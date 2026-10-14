@@ -637,6 +637,11 @@ describe("one request, several steps", () => {
       ["chase everyone who hasn't answered me", { skill: "nudge", args: { who: "everyone" } }, "nudge_all"],
       ["when is the paris marathon? add it to my calendar", { skill: "web_search", args: { query: "paris marathon date" } }, "event_from_web"],
       ["tell Laura yes for dinner and add it to my calendar", { skill: "draft_reply", args: { who: "Laura", message: "yes for dinner" } }, "reply_and_add"],
+      // …and the other way: a chain the request doesn't ask for becomes the plain skill.
+      ["tell Laura yes for dinner on Saturday", { skill: "reply_and_add", args: { who: "Laura", message: "yes for dinner on Saturday" } }, "draft"],
+      ["send a reminder to Tom about the photos", { skill: "reminder_from_email", args: { query: "Tom photos" } }, "nudge"],
+      ["remind me to water the plants on sunday", { skill: "reminder_from_email", args: { query: "plants" } }, "reminder"],
+      ["add my dentist appointment from the confirmation email to my calendar", { skill: "event_from_email", args: { query: "dentist appointment confirmation" } }, "event_from_email"],
     ];
     for (const [text, route, want] of cases) {
       const r = await runCommand(ctx, text, workflows, router({ [text]: route }));

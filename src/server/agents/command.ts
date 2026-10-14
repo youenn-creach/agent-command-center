@@ -85,7 +85,8 @@ export function classify(text: string): { intent: Intent; query?: string; target
     // French: "ajoute un rdv : dentiste mardi 15h", "rdv : …", "événement : …"
     t.match(/^(?:ajoute[rz]?|cr[ée]e[rz]?|nouvel?(?:le)?)\s+(?:un\s+|une\s+)?(?:[ée]v[ée]nement|rdv|rendez-vous)\s*:?\s*(.{2,200})$/i) ??
     t.match(/^(?:rdv|rendez-vous|[ée]v[ée]nement|agenda)\s*:\s*(.{2,200})$/i);
-  if (event) return { intent: "event", query: event[1].trim() };
+  // "add the dentist appointment from the confirmation email to my calendar" is about an email: not an exact event.
+  if (event && !/\b(e-?mails?|mails?|inbox|gmail|confirmation|booking|courriels?|correos?)\b/i.test(event[1])) return { intent: "event", query: event[1].trim() };
   // "remember that I prefer short replies" adds an About-me fact (the user's own words).
   const remember = t.match(/^remember(?: that)?\s*:?\s+(.{2,300})$/i);
   if (remember) return { intent: "remember", query: remember[1].trim() };
@@ -368,6 +369,11 @@ const TO_CALENDAR = /\b(add|put|save|create)\b.*\b(calendar|agenda)\b/i;
 const FLIGHT_WORD = /\b(flights?|planes?|plane tickets)\b/i;
 
 async function runSkill(ctx: Ctx, text: string, route: Route, workflows: WorkflowRegistry): Promise<CommandResult> {
+  // The model sometimes over-picks a chain: without its second half in the request, it's the plain skill.
+  const someoneElse = text.match(/\b(?:send (?:a )?(?:reminder|nudge) to|remind|chase)\s+(?!me\b|myself\b)([A-Z][\p{L}'-]+)/u);
+  if ((route.skill === "reminder_from_email" || route.skill === "reminder") && someoneElse) route = { skill: "nudge", args: { who: someoneElse[1] } };
+  else if (route.skill === "reminder_from_email" && !MAIL_WORD.test(text) && !/\b(bills?|invoices?|renewal|renew|expires?|deadline|due|payment)\b/i.test(text)) route = { skill: "reminder", args: {} };
+  else if (route.skill === "reply_and_add" && !TO_CALENDAR.test(text) && !/\b(calendar|agenda|schedule)\b/i.test(text)) route = { skill: "draft_reply", args: route.args };
   const s = route.skill;
   if (TO_CALENDAR.test(text) && /\b(reply|answer|tell|write back|accept|confirm)\b/i.test(text) && (s === "draft_reply" || s === "add_event") && route.args.who) {
     route = { skill: "reply_and_add", args: route.args };
