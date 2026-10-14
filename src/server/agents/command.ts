@@ -22,7 +22,7 @@ import { APP_CALENDAR_NAME } from "../connectors/google";
 import { calendarMode } from "../calendarMode";
 import { alreadyInCalendar, flightEvent, flightKey, upcomingFlights } from "./flights";
 import { deadlinesToReminders, nudgeAll, prepDay, reminderFromEmail, tripWeather } from "./chains";
-import { agenda, CAN_DO, draftReplyFree, emailQuestion, findEventInEmail, findEventOnWeb, webAnswer, emailSearch, meetingPrep, notesAnswer, nudge, quickRoute, reminderFromText, routeRequest, subscriptions, trips, waitingOn, weatherAnswer, type Route, type SkillAnswer } from "./assistant";
+import { agenda, CAN_DO_SHORT, draftReplyFree, emailQuestion, findEventInEmail, findEventOnWeb, webAnswer, emailSearch, meetingPrep, notesAnswer, nudge, quickRoute, reminderFromText, routeRequest, subscriptions, trips, waitingOn, weatherAnswer, type Route, type SkillAnswer } from "./assistant";
 import { reviewInbox } from "./inboxReview";
 import type { LlmProvider } from "../llm";
 import { finishRequest, setRequestProgress } from "../requests";
@@ -396,6 +396,12 @@ async function runSkill(ctx: Ctx, text: string, route: Route, workflows: Workflo
   if ((route.skill === "reminder_from_email" || route.skill === "reminder") && someoneElse) route = { skill: "nudge", args: { who: someoneElse[1] } };
   else if (route.skill === "reminder_from_email" && !MAIL_WORD.test(text) && !/\b(bills?|invoices?|renewal|renew|expires?|deadline|due|payment)\b/i.test(text)) route = { skill: "reminder", args: {} };
   else if (route.skill === "reply_and_add" && !TO_CALENDAR.test(text) && !/\b(calendar|agenda|schedule)\b/i.test(text)) route = { skill: "draft_reply", args: route.args };
+  // A question about what's coming up is a calendar question, not a 7-minute email review.
+  if (route.skill === "inbox_review" && !MAIL_WORD.test(text) && /\b(coming up|on my plate|schedule|calendar|meetings?|appointments?|events?|agenda)\b/i.test(text)) route = { skill: "agenda", args: {} };
+  // A question ("what is it?") is not a request to set a reminder.
+  else if (route.skill === "reminder_from_email" && !/\b(remind|reminder|don'?t let me forget|before (?:it'?s|they'?re) due|alert me)\b/i.test(text)) route = { skill: "email_question", args: { query: route.args.query } };
+  // "My next flight and the weather there": the trip's forecast (it names the flight too).
+  if (route.skill === "trips" && /\b(weather|forecast|rain|temperature)\b/i.test(text)) route = { skill: "trip_weather", args: {} };
   const s = route.skill;
   if (TO_CALENDAR.test(text) && /\b(reply|answer|tell|write back|accept|confirm)\b/i.test(text) && (s === "draft_reply" || s === "add_event") && route.args.who) {
     route = { skill: "reply_and_add", args: route.args };
@@ -422,7 +428,11 @@ async function runSkill(ctx: Ctx, text: string, route: Route, workflows: Workflo
       const days = Math.min(Math.max(a.days ?? (/\bmonth\b/i.test(text) ? 30 : /\b(two|2) weeks\b/i.test(text) ? 14 : 7), 1), 30);
       if (!isConnected(ctx, "gmail")) return { intent: "inbox_review", reply: "Gmail isn't connected, so I can't read your email. Connect it in Connections & Permissions.", section: "permissions" };
       const spam = /\b(spam|junk)\b/i.test(text);
-      return later("inbox_review", `On it: I'm reading your ${spam ? "spam folder" : "email"} from the last ${days} days with the local model, one message at a time. This takes a few minutes; the answer will appear under “Your requests” on Today, and you'll get a notification if they're on.`, (p) => reviewInbox(ctx, days, p, undefined, 30, spam ? "in:spam" : "in:inbox"));
+      return later("inbox_review", `On it: I'm reading your ${spam ? "spam folder" : "email"} from the last ${days} days with the local model, one message at a time. This takes a few minutes; the answer will appear under “Your requests” on Today, and you'll get a notification if they're on.`, async (p) => {
+        const out = await reviewInbox(ctx, days, p, undefined, 30, spam ? "in:spam" : "in:inbox");
+        // "…then draft replies to anything urgent": the review is done, the drafts are asked for one by one.
+        return /\b(draft|reply|replies|respond|answer)\b/i.test(text) ? { ...out, reply: `${out.reply} I only reviewed your mail: I don't write replies for a whole list on my own. Tell me which one, e.g. “reply to <name> that …”.` } : out;
+      });
     }
     case "email_question": {
       const query = a.query?.trim() || text;
@@ -488,6 +498,10 @@ async function runSkill(ctx: Ctx, text: string, route: Route, workflows: Workflo
     case "draft_reply": {
       if (!a.who) return { intent: "help", reply: "Who should I reply to? Say for example “reply to Ana that Thursday works”." };
       const who = a.who;
+      // A vague mention of a person ("that thing from Laura") isn't a request to write to them: ask what is wanted.
+      if (!/\b(reply|replies|answer|respond|write|tell|say|let .{1,30} know|e-?mail|mail|message|text|confirm|accept|decline)\b/i.test(text)) {
+        return { intent: "help", reply: `What would you like me to do about ${who}? For example “reply to ${who} that Thursday works”, “find the email from ${who}” or “did ${who} answer?”.` };
+      }
       // The writer gets the user's own request, not the model's paraphrase of it.
       const message = text;
       return later("draft", `Writing a reply to ${who} with the local model. It will wait for your approval in the Action Queue; the request board shows when it's ready.`, (p) => draftReplyFree(ctx, who, message, p));
@@ -535,7 +549,7 @@ async function runSkill(ctx: Ctx, text: string, route: Route, workflows: Workflo
       return later("web_search", "Searching the web privately (your own SearXNG) and reading the top pages with the local model. The answer will appear under “Your requests” on Today.", (p) => webAnswer(ctx, text, query, p));
     }
     default:
-      return { intent: "unsupported", unsupported: true, reply: `I can't do that yet${a.reason ? ` (${a.reason})` : ""}. ${CAN_DO}` };
+      return { intent: "unsupported", unsupported: true, reply: `I can't do that yet${a.reason ? ` (${a.reason})` : ""}. ${CAN_DO_SHORT}` };
   }
 }
 
@@ -645,6 +659,18 @@ async function runIntent(ctx: Ctx, text: string, routed: { intent: Intent; query
     }
     case "schedule": {
       const jobs = listJobs(ctx);
+      // "When does the weekly review run?": answer for that task first, then list the rest.
+      const asked = /\bweek/i.test(text) ? "weekly_review" : /\b(brief|morning)/i.test(text) ? "daily_briefing" : /\bfollow/i.test(text) ? "followup_sweep" : null;
+      const job = asked ? jobs.find((j) => j.workflow === asked) : undefined;
+      if (job) {
+        const when = (j: (typeof jobs)[number]) => (j.next_run_at ? new Date(j.next_run_at).toLocaleString("en-GB", { weekday: "long", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: j.timezone }) : null);
+        const next = job.status === "active" ? when(job) : null;
+        return {
+          intent,
+          reply: next ? `“${job.name}” runs next on ${next}.` : `“${job.name}” isn't scheduled to run${job.status !== "active" ? ` (${job.status}${job.status_reason ? `: ${job.status_reason}` : ""})` : ""}. You can change that in Scheduled Agents.`,
+          section: "schedules",
+        };
+      }
       return {
         intent,
         reply: `${jobs.filter((j) => j.status === "active").length} active schedule(s):`,
@@ -667,6 +693,10 @@ async function runIntent(ctx: Ctx, text: string, routed: { intent: Intent; query
       return { intent, reply: `Saved to About me: “${query}”. Agents use it when writing for you; edit or remove it in Knowledge & Data.`, section: "knowledge" };
     }
     case "event": {
+      // "Add the second one": the assistant doesn't remember earlier answers, and says so.
+      if (/^(?:the |that |this )?(?:first|second|third|fourth|last|other|same|that|this|it)(?: one| thing| item| event)?$/i.test(query!.trim())) {
+        return { intent: "help", reply: "I don't remember my earlier answers: each request stands alone. Tell me the event itself, for example “add dentist friday 3pm”." };
+      }
       const prepared = parseEventRequest(query!, ctx.now(), config().timezone);
       if ("error" in prepared) return { intent, reply: prepared.error };
       const manual = (note = "") => {

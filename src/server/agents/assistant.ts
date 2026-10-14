@@ -415,7 +415,7 @@ export async function trips(ctx: Ctx): Promise<SkillAnswer> {
   if (!flights.length && !others.length) return { reply: `I found no trips or bookings in your mail (confirmations from the last 6 months).${note ? ` ${note}` : ""}`, section: "insights" };
   const fmtDate = (d: { y: number; m: number; d: number }) => new Date(Date.UTC(d.y, d.m - 1, d.d, 12)).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
   return {
-    reply: `${flights.length} upcoming flight${flights.length === 1 ? "" : "s"}${others.length ? ` and ${others.length} other booking${others.length === 1 ? "" : "s"}` : ""}. Say “add my flights to my calendar” to add them.${note ? ` ${note}` : ""}`,
+    reply: `${flights.length ? `Your next flight: ${flights[0].from} → ${flights[0].to} on ${fmtDate(flights[0].date)}${flights[0].time ? ` at ${flights[0].time}` : ""}. ` : ""}${flights.length} upcoming flight${flights.length === 1 ? "" : "s"}${others.length ? ` and ${others.length} other booking${others.length === 1 ? "" : "s"}` : ""}. Say “add my flights to my calendar” to add them.${note ? ` ${note}` : ""}`,
     items: [
       ...flights.map((f) => ({ title: `✈ ${f.from} → ${f.to} · ${fmtDate(f.date)}${f.time ? ` ${f.time}` : ""}`, detail: [f.airline, f.ref].filter(Boolean).join(" · ") || undefined })),
       ...others.map((b) => ({ title: b.subject, detail: `${b.kind} · confirmation received ${ago(b.received_at, ctx.now())}` })),
@@ -516,9 +516,22 @@ const ANSWER_SYSTEM = [
   UNTRUSTED_DATA_RULES,
 ].join("\n");
 
+/** Model answers are shown as plain text, so Markdown (bold, headings, bullets, trailing notes) is turned into plain text. */
+export function plainAnswer(text: string): string {
+  return text
+    .replace(/^\s*\*\(?(?:Note|Disclaimer)[\s\S]*$/im, "")
+    .replace(/\*\*|__|`/g, "")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*[*-]\s+/gm, "• ")
+    .replace(/([^\n])\s+•\s+/g, "$1\n• ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 const WEB_SYSTEM = [
   "You answer the user's question using ONLY the web search results and pages given below.",
   "Give the answer first, with the key facts (names, dates, numbers), and cite sources like [1]. Prefer the most recent and most official sources; say when sources disagree.",
+  "State ONLY facts written in the sources: no background, history, records or comparisons from your own knowledge (they are often wrong). Two sentences are usually enough; end after the answer.",
   "If the sources don't answer the question, say so plainly in one sentence. Do not guess. Answer in English, in at most four sentences of plain text (no Markdown, no notes).",
   UNTRUSTED_DATA_RULES,
 ].join("\n");
@@ -534,9 +547,7 @@ export async function webAnswer(ctx: Ctx, question: string, query: string, progr
   const today = ctx.now().toISOString().slice(0, 10);
   const sources = found.results.map((r) => fenceUntrusted(`web result [${r.n}] ${new URL(r.url).hostname}`, `Title: ${r.title}\nSnippet: ${r.snippet}${found.pages.has(r.n) ? `\nPage text: ${found.pages.get(r.n)}` : ""}`)).join("\n\n");
   const out = await llm.generate(WEB_SYSTEM, `Today is ${today}.\nQuestion: ${question}\n\n${sources}`, { maxTokens: 260, timeoutMs: 1_200_000 });
-  // Plain text: the answer is shown as is, so Markdown emphasis would appear as asterisks.
-  const plain = out.text.replace(/\*\*|__/g, "").replace(/^\s*\*\(?(Note|Disclaimer)[\s\S]*$/im, "").trim();
-  return { reply: plain, items: webItems(found.results) };
+  return { reply: plainAnswer(out.text), items: webItems(found.results) };
 }
 
 /** Reads the top matches of a Gmail search (skipping AI-directed text) for the local model. */
@@ -764,7 +775,7 @@ export async function emailQuestion(ctx: Ctx, question: string, query: string, p
   progress("Writing the answer…");
   const out = await llm.generate(ANSWER_SYSTEM, `Question: ${question}\n\n${read.map((r) => fenceUntrusted(`email [${r.n}] from ${r.sender}`, `Subject: ${r.subject}\nDate: ${r.date.slice(0, 10)}\n\n${r.text}`)).join("\n\n")}`, { maxTokens: 200, timeoutMs: 1_200_000 });
   return {
-    reply: out.text.trim(),
+    reply: plainAnswer(out.text),
     items: read.map((r) => ({ title: `[${r.n}] ${r.subject}`, detail: `${parseSender(r.sender).name ?? r.sender} · ${dayLabel(r.date)}` })),
   };
 }
@@ -807,13 +818,14 @@ export async function meetingPrep(ctx: Ctx, text: string, who: string, progress:
   ].join("\n\n");
   const out = await llm.generate(PREP_SYSTEM, `Meeting with or about: ${who}\n\n${material}`, { maxTokens: 260, timeoutMs: 1_200_000 });
   return {
-    reply: out.text.trim(),
+    reply: plainAnswer(out.text),
     items: [...(event ? [{ title: `📅 ${event.title}`, detail: event.detail }] : []), ...read.map((r) => ({ title: `[${r.n}] ${r.subject}`, detail: `${parseSender(r.sender).name ?? r.sender} · ${dayLabel(r.date)}` })), ...notes.map((n) => ({ title: `📝 ${n.title}` }))],
     section: "today",
   };
 }
 
 /** What the assistant can do, for an honest "not yet" answer. */
+export const CAN_DO_SHORT = "Try: “what needs my attention in my email?”, “what's on tomorrow?”, “remind me to …”, “find the race in my email and add it to my calendar”, “who hasn't answered me?”, “who won …?” (web search) or “brief me”.";
 export const CAN_DO =
   "I can: review your recent email (or spam) for things that need you, search your mail or answer questions from it, answer about your calendar, add events, flights or an event found in your email or on the web to your calendar, set reminders (also from a bill or deadline in your mail), draft replies and nudges for your approval (one or everyone), list who owes you an answer, your trips and subscriptions, give the weather (also for your next trip), search the web privately, answer from your notes, prepare a meeting or a whole day, run the briefing or weekly review.";
 
@@ -829,14 +841,15 @@ export async function draftReplyFree(ctx: Ctx, who: string, message: string, pro
   const name = who.replace(/["\\]/g, "").trim();
   let rows;
   try {
-    rows = await callTool(ctx, "inbox", "gmail.search", { query: `from:"${name}" newer_than:90d`, max: 1 }, new RunBudget(1, 60_000));
-    if (!rows.length) rows = await callTool(ctx, "inbox", "gmail.search", { query: `"${name}" newer_than:90d -in:sent`, max: 1 }, new RunBudget(1, 60_000));
+    // A person's own mail, never a newsletter or mailing list they happen to send (a reply to those goes to everyone).
+    rows = (await callTool(ctx, "inbox", "gmail.search", { query: `from:"${name}" newer_than:90d`, max: 10 }, new RunBudget(1, 60_000))).filter((r) => !r.bulk && !/\[[^\]]{2,40}\]/.test(r.subject));
+    if (!rows.length) rows = (await callTool(ctx, "inbox", "gmail.search", { query: `"${name}" newer_than:90d -in:sent`, max: 10 }, new RunBudget(1, 60_000))).filter((r) => !r.bulk && !/\[[^\]]{2,40}\]/.test(r.subject));
   } catch (err) {
     if (denied(err)) return { reply: "The Inbox agent needs Read on Gmail to find that email. Grant it in Connections & Permissions.", section: "permissions" };
     throw err;
   }
   const msg = rows[0];
-  if (!msg) return { reply: `I couldn't find an email from “${who}” in the last 90 days to reply to.` };
+  if (!msg) return { reply: `I couldn't find a personal email from “${who}” in the last 90 days to reply to (newsletters and mailing lists don't count). I can only reply to an email I can find: say “reply to <name> that …”.` };
   const { name: senderName, email } = parseSender(msg.sender);
   if (!email) return { reply: "I couldn't read that sender's address." };
   progress(`Reading “${msg.subject}” and writing the reply…`);
@@ -883,7 +896,7 @@ export async function notesAnswer(ctx: Ctx, query: string, progress: (s: string)
   const res = await retrieve(ctx, { query, provider, k: 4, answer: true }, localLlm(ctx, "background"), "chief_of_staff");
   if (!res.passages.length) return { reply: `I found nothing about “${query}” in your notes.`, section: "knowledge" };
   return {
-    reply: res.answer?.text ?? `Top notes for “${query}”:`,
+    reply: res.answer?.text ? plainAnswer(res.answer.text) : `Top notes for “${query}”:`,
     items: res.passages.map((p) => ({ title: p.title, detail: `${p.text.slice(0, 160)}${p.text.length > 160 ? "…" : ""}${p.flags.length ? " ⚠ contains instruction-like text (treated as data)" : ""}` })),
     section: "tech",
   };

@@ -151,37 +151,3 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     </ToastCtx.Provider>
   );
 }
-
-/** Minimal markdown for briefings: **bold** headings and "- " bullets. Renders text only (no HTML injection). */
-export function MiniMarkdown({ text }: { text: string }) {
-  const blocks = text.split(/\n{2,}/);
-  return (
-    <div className="space-y-3 text-sm leading-relaxed">
-      {blocks.map((b, i) => {
-        const lines = b.split("\n");
-        return (
-          <div key={i}>
-            {lines.map((line, j) => {
-              const heading = line.match(/^\*\*(.+)\*\*$/);
-              if (heading) return <h4 key={j} className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">{heading[1]}</h4>;
-              const bullet = line.match(/^\s*[-*•]\s+(.*)$/);
-              const content = renderInline(bullet ? bullet[1] : line);
-              return bullet ? (
-                <p key={j} className="flex gap-2">
-                  <span className="text-muted">•</span>
-                  <span>{content}</span>
-                </p>
-              ) : (
-                <p key={j}>{content}</p>
-              );
-            })}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function renderInline(s: string) {
-  return s.split(/(\*\*[^*]+\*\*)/g).map((part, i) => (part.startsWith("**") && part.endsWith("**") ? <strong key={i}>{part.slice(2, -2)}</strong> : <span key={i}>{part}</span>));
-}

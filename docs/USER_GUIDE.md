@@ -21,6 +21,7 @@ They have separate data. The link at the top right switches between them.
 - **Impact this week**: what the assistant did for you over the last 7 days. Conversations revived (someone answered after a nudge you approved), nudges and replies approved, trips and bookings tracked (and how many became reminders), subscriptions that look paid, and an *estimated* time saved. Everything is counted from what actually happened; only the time is an estimate, and "How the time saved is estimated" shows the minutes used for each item. Drafts you dismissed count as zero;
 - your agenda and the messages waiting on your reply;
 - the latest briefing and your reminders;
+- **Running now**: appears while something works (a Ctrl+K request, a scheduled task, the local model): what it is, its stage (“Reading email 4 of 12…”), how long it has run, CPU and memory, the busiest programs, and a plain sentence on the **bottleneck** (the model using all the CPU, another program hogging it, or low memory). When nothing runs it shrinks to one “Idle” line with the model held in memory.
 - **Your requests**: everything you asked with Ctrl+K, and where it is now (waiting for approval, done…). Click one to jump to it.
 
 **Action Queue.** Everything the agents prepared, waiting for you:

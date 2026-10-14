@@ -1,4 +1,4 @@
-import { localToday, zonedToUtc, type Ymd } from "./eventParse";
+import { localToday, normalizeDayWords, zonedToUtc, type Ymd } from "./eventParse";
 
 /**
  * The period a question is about ("tomorrow", "this weekend", "next friday afternoon", "next week",
@@ -25,7 +25,7 @@ const weekday = ({ y, m, d }: Ymd) => new Date(Date.UTC(y, m - 1, d)).getUTCDay(
 const fmt = (d: Ymd, tz: string) => zonedToUtc(d, 12 * 60, tz).toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", timeZone: tz });
 
 export function parseRange(text: string, now: Date, tz: string): Range {
-  const t = text.toLowerCase();
+  const t = normalizeDayWords(text).toLowerCase();
   const today = localToday(now, tz);
   const span = (start: Ymd, days: number, label: string, hours: [number, number] = [0, 24]): Range => ({
     from: zonedToUtc(start, hours[0] * 60, tz),

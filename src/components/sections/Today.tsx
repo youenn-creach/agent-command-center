@@ -1,9 +1,11 @@
 "use client";
 
 import { RequestsCard } from "../Requests";
+import { RunningNow } from "../RunningNow";
+import { BriefingView } from "../BriefingView";
 import { useState } from "react";
 import type { SectionProps, Go } from "../Dashboard";
-import { Badge, Button, Card, Empty, MiniMarkdown, SectionHeader, Technical, useToast } from "../ui";
+import { Badge, Button, Card, Empty, SectionHeader, Technical, useToast } from "../ui";
 import { RemindersCard } from "../Reminders";
 import { ImpactCard } from "../Impact";
 import { fmtTime, post, relative } from "../api";
@@ -68,7 +70,7 @@ export function TodayView({ state, refresh, go }: SectionProps & { go: Go }) {
                 </Technical>
                 {briefing.provenance.flaggedItems > 0 && <Badge tone="danger">{briefing.provenance.flaggedItems} item(s) contained instructions — treated as data</Badge>}
               </div>
-              <MiniMarkdown text={briefing.body} />
+              <BriefingView body={briefing.body} />
               <Technical>
               <details className="mt-4 rounded-lg bg-panel-2 p-3 text-xs">
                 <summary className="cursor-pointer font-medium">How this briefing was made</summary>
@@ -92,6 +94,7 @@ export function TodayView({ state, refresh, go }: SectionProps & { go: Go }) {
           )}
         </Card>
         <div className="space-y-4">
+          <RunningNow state={state} />
           <RemindersCard reminders={state.today.reminders} refresh={refresh} onEmpty={() => go("actions")} />
           <RequestsCard requests={state.requests} go={go} />
           {state.today.weekly && (
@@ -99,7 +102,7 @@ export function TodayView({ state, refresh, go }: SectionProps & { go: Go }) {
               <details>
                 <summary className="cursor-pointer text-xs font-medium text-accent">Show the weekly review</summary>
                 <div className="mt-2">
-                  <MiniMarkdown text={state.today.weekly.body} />
+                  <BriefingView body={state.today.weekly.body} />
                 </div>
               </details>
             </Card>

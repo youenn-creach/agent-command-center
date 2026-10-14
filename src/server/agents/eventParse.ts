@@ -72,8 +72,13 @@ function toMinutes(h: string, min: string | undefined, ampm: string | undefined)
   return hour * 60 + minute;
 }
 
+/** Texting spellings of day words ("tmrw", "tomorow", "tonite"), so a typo doesn't turn tomorrow into today. */
+export function normalizeDayWords(text: string): string {
+  return text.replace(/\b(?:tmrw|tmr|tmrow|tomorow|tommorow|tommorrow|tomorrow|2moro|2morrow)\b/gi, "tomorrow").replace(/\btonite\b/gi, "tonight");
+}
+
 export function parseEventRequest(text: string, now: Date, tz: string): PreparedEvent | { error: string } {
-  let s = ` ${text.replace(/\s+/g, " ").trim()} `;
+  let s = ` ${normalizeDayWords(text).replace(/\s+/g, " ").trim()} `;
   const take = (re: RegExp) => {
     const m = s.match(re);
     if (m) s = s.replace(m[0], " ");
@@ -98,8 +103,13 @@ export function parseEventRequest(text: string, now: Date, tz: string): Prepared
     const single =
       take(new RegExp(`\\s(?:(?:at|à)\\s+)?(\\d{1,2})(?:[:h.](\\d{2}))?\\s*(am|pm)(?=\\s)`, "i")) ??
       take(/\s(?:(?:at|à)\s+)?(\d{1,2})[:h](\d{2})(?=\s)/i) ??
-      take(/\s(?:(?:at|à)\s+)?(\d{1,2})h()(?=\s)/i); // "15h"
-    if (single) {
+      take(/\s(?:(?:at|à)\s+)?(\d{1,2})h()(?=\s)/i) ?? // "15h"
+      // "at 9", "at 3": a bare hour after "at" at the end or before a day word. Small hours are afternoon (1-6), then morning.
+      take(/\s(?:at|à)\s+(\d{1,2})()(?=\s*$|\s+(?:on|tomorrow|today|tonight|for|next|and|with|in|every|this|the)\b)/i);
+    if (single && !single[2] && !single[3] && /^\s(?:at|à)\s+\d{1,2}\s*$/i.test(single[0]) && Number(single[1]) >= 1 && Number(single[1]) <= 12) {
+      const h = Number(single[1]);
+      start = (h === 12 ? 12 : h <= 6 ? h + 12 : h) * 60;
+    } else if (single) {
       start = toMinutes(single[1], single[2], single[3]);
       if (start === null) return { error: "That time doesn't look right. Try “3pm” or “15:00”." };
     } else if (take(/\s(?:(?:at|à)\s+)?(?:noon|midi)(?=\s)/i)) start = 12 * 60;

@@ -694,3 +694,95 @@ describe("requests that run in the background", () => {
     expect(rows.find((r) => r.id === "now")?.state).toBe("working");
   });
 });
+
+describe("how people actually type", () => {
+  const NOW_D = new Date("2026-10-14T10:00:00Z"); // Wednesday
+  it("understands texting spellings of tomorrow", async () => {
+    const { parseRange } = await import("@/server/agents/when");
+    for (const w of ["tmrw", "tmr", "tomorow", "tommorow", "2moro"]) expect(parseRange(`whats on ${w}`, NOW_D, "Europe/Paris").label).toMatch(/^tomorrow \(Thursday 15 October\)/);
+  });
+  it("reads a bare hour after 'at' (small hours are afternoon), without eating street numbers", async () => {
+    const { parseEventRequest } = await import("@/server/agents/eventParse");
+    const at = (t: string) => { const e = parseEventRequest(t, NOW_D, "Europe/Paris"); return "error" in e ? e.error : `${e.title} | ${e.start}`; };
+    expect(at("call the plumber tomorrow at 9")).toBe("Call the plumber | 2026-10-15T09:00");
+    expect(at("dentist tomorrow at 3")).toBe("Dentist | 2026-10-15T15:00");
+    expect(at("lunch at 12 tomorrow")).toBe("Lunch | 2026-10-15T12:00");
+    expect(at("meet Sam tomorrow 10:30 at 5 Rue de Rivoli")).toMatch(/\| 2026-10-15T10:30$/);
+  });
+});
+
+describe("model answers are plain text", () => {
+  it("removes Markdown the board would show as symbols", async () => {
+    const { plainAnswer } = await import("@/server/agents/assistant");
+    expect(plainAnswer("The **kitchen** plan [1]: - Ceiling: €8,000 - Quote B (€7,600)\n\n*(Note: as of today)*")).toBe("The kitchen plan [1]: - Ceiling: €8,000 - Quote B (€7,600)");
+    expect(plainAnswer("## Brief\n* one\n* two")).toBe("Brief\n• one\n• two");
+  });
+});
+
+describe("a question about one scheduled task", () => {
+  it("answers for that task instead of listing them all", async () => {
+    const ctx = seededCtx(new Date(NOW));
+    const text = "when does the weekly review run?";
+    const r = await runCommand(ctx, text, workflows, router({ [text]: { skill: "schedules", args: {} } }));
+    expect(r.reply).toMatch(/^“.*[Ww]eekly.*” runs next on \w+day \d+ \w+,? \d\d:\d\d\.$/);
+    expect(r.items).toBeUndefined();
+    const all = await runCommand(ctx, "what's scheduled?", workflows, router({ "what's scheduled?": { skill: "schedules", args: {} } }));
+    expect(all.reply).toMatch(/active schedule/);
+  });
+});
+
+describe("vague requests get a question, not a guess", () => {
+  it("“that thing from Laura” asks what to do instead of writing to Laura", async () => {
+    const ctx = seededCtx();
+    const text = "that thing from Laura";
+    const r = await runCommand(ctx, text, workflows, router({ [text]: { skill: "draft_reply", args: { who: "Laura", message: text } } }));
+    expect(r.reply).toMatch(/^What would you like me to do about Laura\? For example “reply to Laura that Thursday works”/);
+    expect(all(ctx.db, "SELECT 1 FROM actions WHERE title LIKE '%Laura%'")).toHaveLength(0);
+  });
+});
+
+describe("lessons from the second simulation", () => {
+  it("a question about what's coming up is a calendar question, not an email review", async () => {
+    const ctx = seededCtx(new Date(NOW));
+    const text = "do I have anything coming up this week, and do I need to prepare for any of it?";
+    const r = await runCommand(ctx, text, workflows, router({ [text]: { skill: "inbox_review", args: { days: 7 } } }));
+    expect(r.intent).toBe("agenda");
+  });
+  it("a question isn't a reminder request", async () => {
+    const { ctx } = await withGmail();
+    const text = "i need to renew something soon, what is it?";
+    const r = await runCommand(ctx, text, workflows, router({ [text]: { skill: "reminder_from_email", args: { query: "renew" } } }));
+    expect(r.intent).toBe("email_question");
+  });
+  it("says it doesn't remember earlier answers when asked to add 'the second one'", async () => {
+    const ctx = seededCtx(new Date(NOW));
+    const text = "add the second one to my calendar";
+    const r = await runCommand(ctx, text, workflows, router({}));
+    expect(r.reply).toMatch(/I don't remember my earlier answers/);
+  });
+});
+
+describe("lessons from the end of the second simulation", () => {
+  it("“my next flight and the weather there” gives the trip's forecast", async () => {
+    const ctx = seededCtx(new Date(NOW));
+    const text = "what's my next flight and what will the weather be like there?";
+    const r = await runCommand(ctx, text, workflows, router({ [text]: { skill: "trips", args: {} } }));
+    expect(r.intent).toBe("trip_weather");
+  });
+  it("the trips answer starts with the next flight", async () => {
+    const { trips } = await import("@/server/agents/assistant");
+    const out = await trips(seededCtx(new Date("2026-10-14T08:00:00Z")));
+    expect(out.reply).toMatch(/^Your next flight: BCN → LIS on \w{3}, 7 Nov 2026 at 07:40\. 1 upcoming flight/);
+  });
+  it("never replies on a mailing list thread when asked to write to a person", async () => {
+    const { ctx } = await withGmail();
+    MAIL.m9 = { days: 1, headers: { From: "Marc Lambert <club@lists.example>", To: "me@example.com", Subject: "Re: [Hiking Club] Autumn trip signup!", "Message-ID": "<m9@x>", "List-Unsubscribe": "<mailto:u@lists.example>" }, body: "Sign up for the autumn trip." };
+    try {
+      const { draftReplyFree } = await import("@/server/agents/assistant");
+      const out = await draftReplyFree(ctx, "Marc", "email Marc that I'll be late", () => {});
+      expect(out.reply).toMatch(/couldn't find a personal email from “Marc”/);
+    } finally {
+      delete MAIL.m9;
+    }
+  });
+});
