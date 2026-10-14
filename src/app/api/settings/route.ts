@@ -1,0 +1,70 @@
+import { z } from "zod";
+import { handler, HttpError, rateLimit, readJson } from "@/server/http";
+import { LLM_TASKS, selectModel, setLanguageModel, speedTest } from "@/server/llm";
+import { LANG_NAMES } from "@/server/lang";
+import { logActivity } from "@/server/activity";
+import { setSetting } from "@/server/db";
+import { offloadModels } from "@/server/llmRuntime";
+import { notify, NotifyError, NotifySettingsInput, setNotificationSettings } from "@/server/notify";
+import { FeedError } from "@/server/news/feeds";
+import { setCalendarMode } from "@/server/calendarMode";
+import { pruneOldData, RetentionSchema, setRetention } from "@/server/retention";
+
+const Body = z.discriminatedUnion("op", [
+  z.object({ op: z.literal("select-model"), model: z.string().min(1).max(120).regex(/^[\w.:/-]+$/), task: z.enum(LLM_TASKS as [string, ...string[]]) }),
+  z.object({ op: z.literal("speed-test"), model: z.string().min(1).max(120).regex(/^[\w.:/-]+$/).optional() }),
+  z.object({ op: z.literal("retention"), value: RetentionSchema }),
+  z.object({ op: z.literal("prune-now") }),
+  z.object({ op: z.literal("ui-simple"), value: z.boolean() }),
+  z.object({ op: z.literal("offload"), mode: z.enum(["now", "when-idle"]) }),
+  z.object({ op: z.literal("notify-settings"), value: NotifySettingsInput }),
+  z.object({ op: z.literal("notify-test") }),
+  z.object({ op: z.literal("calendar-mode"), mode: z.enum(["app", "link"]) }),
+  z.object({ op: z.literal("language-model"), lang: z.enum(["en", "fr", "es", "ca"]), model: z.string().min(1).max(200).regex(/^[\w.:/-]+$/).nullable() }),
+]);
+
+export const POST = handler(true, async (req, ctx) => {
+  const body = Body.parse(await readJson(req));
+  if (body.op === "select-model") {
+    await selectModel(ctx, body.model, body.task as "background" | "interactive");
+    logActivity(ctx, { actor: "user", kind: "system", outcome: "info", summary: `Local LLM for ${body.task} tasks set to ${body.model}` });
+    return { ok: true };
+  }
+  if (body.op === "retention") {
+    setRetention(ctx, body.value);
+    return { removed: pruneOldData(ctx) };
+  }
+  if (body.op === "prune-now") return { removed: pruneOldData(ctx) };
+  if (body.op === "offload") return offloadModels(ctx, body.mode);
+  if (body.op === "notify-settings") {
+    try {
+      setNotificationSettings(ctx, body.value);
+    } catch (err) {
+      if (err instanceof NotifyError || err instanceof FeedError) throw new HttpError(400, err.message);
+      throw err;
+    }
+    return { ok: true };
+  }
+  if (body.op === "language-model") {
+    await setLanguageModel(ctx, body.lang, body.model);
+    logActivity(ctx, { actor: "user", kind: "system", outcome: "info", summary: body.model ? `Reply drafts in ${LANG_NAMES[body.lang]} now use ${body.model}` : `Reply drafts in ${LANG_NAMES[body.lang]} use the background model` });
+    return { ok: true };
+  }
+  if (body.op === "calendar-mode") {
+    setCalendarMode(ctx, body.mode);
+    logActivity(ctx, { actor: "user", kind: "system", outcome: "info", summary: body.mode === "app" ? "Calendar events: the app creates them after your approval" : "Calendar events: you add them yourself in Google Calendar" });
+    return { ok: true };
+  }
+  if (body.op === "notify-test") {
+    rateLimit("notify-test", 4);
+    const sent = await notify(ctx, { key: "test", kind: "test", title: "Agent Command Center", summary: "Test notification: notifications work." });
+    if (!sent) throw new HttpError(400, "Turn on desktop notifications or add an ntfy topic first.");
+    return sent;
+  }
+  if (body.op === "ui-simple") {
+    setSetting(ctx.db, "ui.simple", body.value ? "1" : "0");
+    return { ok: true };
+  }
+  rateLimit("speed-test", 3);
+  return speedTest(ctx, body.model);
+});

@@ -1,0 +1,43 @@
+<!doctype html>
+<!-- Source of docs/social-preview.png (1280×640): the repository's link card on GitHub and LinkedIn. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Agent Command Center preview</title>
+<style>
+  :root { --bg: #0c1018; --panel: #121826; --line: #253049; --text: #e7ebf3; --muted: #93a0b8; --accent: #8ea2ff; --mongo: #3fd59a; --voyage: #b49bff; }
+  * { box-sizing: border-box; margin: 0; }
+  body { width: 1280px; height: 640px; background: var(--bg); color: var(--text); font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  .wrap { display: grid; grid-template-columns: 560px 1fr; gap: 40px; height: 100%; padding: 56px 0 56px 64px; }
+  .logo { display: inline-flex; align-items: center; justify-content: center; width: 52px; height: 52px; border-radius: 12px; background: #3f5bd8; color: #fff; font-weight: 800; font-size: 20px; }
+  h1 { font-size: 46px; line-height: 1.08; font-weight: 800; letter-spacing: -0.02em; margin-top: 26px; }
+  .tag { margin-top: 18px; font-size: 21px; line-height: 1.4; color: var(--muted); }
+  .rule { margin-top: 26px; font-size: 19px; font-weight: 600; }
+  .rule b { color: var(--accent); }
+  .bars { margin-top: 30px; display: grid; gap: 12px; }
+  .bar { display: grid; grid-template-columns: 250px 1fr 56px; align-items: center; gap: 12px; font-size: 15px; }
+  .track { height: 14px; border-radius: 0 4px 4px 0; background: #182032; position: relative; }
+  .fill { position: absolute; inset: 0 auto 0 0; border-radius: 0 4px 4px 0; }
+  .pct { font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
+  .foot { margin-top: 26px; font-size: 14px; color: var(--muted); }
+  .shot { align-self: center; border-radius: 14px 0 0 14px; border: 1px solid var(--line); border-right: 0; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.45); }
+  .shot img { display: block; width: 900px; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div>
+      <span class="logo">AC</span>
+      <h1>A private AI chief of staff that runs on your laptop</h1>
+      <p class="tag">Reads Gmail and Calendar, finds what you're forgetting, drafts replies in four languages with local models.</p>
+      <p class="rule">Agents propose. <b>You approve the exact content.</b> Nothing is ever sent.</p>
+      <div class="bars" aria-label="Right note ranked first, 26 paraphrased questions">
+        <div class="bar"><span>Keyword search</span><span class="track"><span class="fill" style="width:81%;background:#5b6577"></span></span><span class="pct">81%</span></div>
+        <div class="bar"><span>Atlas Vector Search + Voyage AI</span><span class="track"><span class="fill" style="width:100%;background:var(--mongo)"></span></span><span class="pct">100%</span></div>
+      </div>
+      <p class="foot">Right note first, 26 paraphrased questions · Atlas · Voyage AI · Ollama · $0</p>
+    </div>
+    <div class="shot"><img src="screenshots/today-dark.png" alt=""></div>
+  </div>
+</body>
+</html>

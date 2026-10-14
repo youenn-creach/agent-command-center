@@ -1,0 +1,63 @@
+{
+  "name": "agent-command-center",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -H 127.0.0.1 -p 3000",
+    "build": "next build",
+    "build:e2e": "ACC_DIST_DIR=.next-e2e next build",
+    "start": "next start -H 127.0.0.1 -p 3000",
+    "worker": "tsx scripts/worker.mts",
+    "mcp": "tsx scripts/mcp-server.mts",
+    "demo:reset": "tsx scripts/reset-demo.mts",
+    "setup:local-embeddings": "tsx scripts/setup-local-embeddings.mts",
+    "atlas:setup": "tsx scripts/atlas-setup.mts",
+    "eval": "tsx scripts/eval.mts",
+    "lint": "eslint",
+    "typecheck": "next typegen && tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run lint && npm run test",
+    "worker:install": "tsx scripts/worker-service.mts install",
+    "worker:uninstall": "tsx scripts/worker-service.mts uninstall",
+    "worker:status": "tsx scripts/worker-service.mts status",
+    "db:backup": "tsx scripts/backup.mts",
+    "db:restore": "tsx scripts/backup.mts restore",
+    "test:e2e": "playwright test",
+    "app:install": "tsx scripts/app-service.mts install",
+    "app:deploy": "tsx scripts/app-service.mts deploy",
+    "app:uninstall": "tsx scripts/app-service.mts uninstall",
+    "app:status": "tsx scripts/app-service.mts status",
+    "demo:install": "tsx scripts/app-service.mts demo-install",
+    "demo:uninstall": "tsx scripts/app-service.mts demo-uninstall"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.3.1",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "croner": "^10.0.1",
+    "fast-xml-parser": "^5.11.2",
+    "mongodb": "^7.7.0",
+    "next": "16.4.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "undici": "^8.11.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "@playwright/test": "^1.64.0",
+    "@tailwindcss/turbopack": "^4",
+    "@types/node": "^24.19.2",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^10",
+    "eslint-config-next": "16.4.0",
+    "tailwindcss": "^4",
+    "tsx": "^4.23.15",
+    "typescript": "^5",
+    "vitest": "^5.0.4"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "license": "MIT"
+}

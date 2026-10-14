@@ -1,0 +1,187 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 780" width="1280" height="780" role="img" aria-labelledby="t d" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif">
+  <title id="t">Agent Command Center architecture</title>
+  <desc id="d">A local-first dashboard. The browser, the scheduler worker and an MCP client reach a fixed orchestrator and four specialist agents. Every tool call passes a server-side policy engine; external effects need a hash-bound approval. Untrusted content passes a fence before the local LLM, which never receives tools. Retrieval runs locally or, opt-in, through MongoDB Atlas and Voyage AI (the fictional corpus, plus notes the user shares one by one). Google, webhooks, RSS and weather are reached only through permission-checked tools and approved effects.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#64748b"/>
+    </marker>
+    <marker id="aG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#00684a"/>
+    </marker>
+    <marker id="aV" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#6a3fd1"/>
+    </marker>
+    <marker id="aR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#dc2626"/>
+    </marker>
+    <style>
+      .zone { font-size: 12.5px; font-weight: 700; letter-spacing: .06em; fill: #475569; }
+      .h { font-size: 14px; font-weight: 700; fill: #0f172a; }
+      .hc { font-size: 13px; font-weight: 700; fill: #0f172a; text-anchor: middle; }
+      .s { font-size: 11.5px; fill: #475569; }
+      .tiny { font-size: 10.5px; fill: #64748b; }
+      .lbl { font-size: 10.5px; fill: #475569; font-weight: 600; }
+      .box { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.2; }
+      .ln { stroke: #64748b; stroke-width: 1.6; fill: none; stroke-linejoin: round; stroke-linecap: round; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1280" height="780" rx="18" fill="#f8fafc"/>
+  <text x="32" y="44" font-size="24" font-weight="800" fill="#0f172a">Agent Command Center</text>
+  <text x="32" y="66" class="s">Local-first personal agents · every tool call permission-checked on the server · external effects need explicit approval</text>
+
+  <!-- zones -->
+  <rect x="20" y="86" width="870" height="640" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-dasharray="6 5"/>
+  <text x="40" y="112" class="zone">THIS MACHINE · 127.0.0.1 ONLY · WORKS OFFLINE</text>
+  <rect x="910" y="86" width="350" height="640" rx="14" fill="#f1f5f9" stroke="#94a3b8" stroke-dasharray="6 5"/>
+  <text x="930" y="112" class="zone">CLOUD · OPTIONAL · OPT-IN</text>
+
+  <!-- column A: entry points -->
+  <rect x="40" y="130" width="210" height="64" rx="10" fill="#eef2ff" stroke="#6366f1"/>
+  <text x="56" y="156" class="h">Dashboard (browser)</text>
+  <text x="56" y="176" class="s">insights · approvals · Ctrl+K</text>
+
+  <rect x="40" y="210" width="210" height="56" rx="10" class="box"/>
+  <text x="56" y="234" class="h">Scheduler worker</text>
+  <text x="56" y="252" class="s">systemd · cron + timezone</text>
+
+  <rect x="40" y="360" width="210" height="50" rx="10" class="box"/>
+  <text x="56" y="381" class="h">MCP client</text>
+  <text x="56" y="399" class="s">stdio · 4 read-mostly tools</text>
+
+  <!-- column B: core -->
+  <rect x="290" y="130" width="360" height="64" rx="10" class="box"/>
+  <text x="306" y="156" class="h">API route handlers</text>
+  <text x="306" y="176" class="s">localhost only · CSRF checks · zod · rate limits · CSP</text>
+
+  <rect x="290" y="210" width="360" height="56" rx="10" fill="#f8fafc" stroke="#334155"/>
+  <text x="306" y="234" class="h">Chief of Staff</text>
+  <text x="306" y="252" class="s">fixed workflows · tool-call &amp; time budget · no data access</text>
+
+  <rect x="290" y="290" width="84" height="44" rx="8" class="box"/><text x="332" y="317" class="hc">Inbox</text>
+  <rect x="382" y="290" width="84" height="44" rx="8" class="box"/><text x="424" y="317" class="hc">Calendar</text>
+  <rect x="474" y="290" width="84" height="44" rx="8" class="box"/><text x="516" y="317" class="hc">Follow-up</text>
+  <rect x="566" y="290" width="84" height="44" rx="8" class="box"/><text x="608" y="317" class="hc">Knowledge</text>
+
+  <rect x="290" y="360" width="360" height="50" rx="10" class="box"/>
+  <text x="306" y="381" class="h">Tool registry</text>
+  <text x="306" y="399" class="s">typed tools only · no shell, files, raw URLs or permission tools</text>
+
+  <rect x="290" y="428" width="360" height="56" rx="10" fill="#fffbeb" stroke="#d97706" stroke-width="1.6"/>
+  <text x="306" y="452" class="h">🔒 Policy engine</text>
+  <text x="306" y="471" class="s">effective = min(service, agent, role) · on every call</text>
+
+  <rect x="290" y="506" width="170" height="74" rx="10" fill="#fffbeb" stroke="#d97706"/>
+  <text x="304" y="530" class="h">🔒 Approvals</text>
+  <text x="304" y="549" class="s">bound to the exact</text>
+  <text x="304" y="565" class="s">content + destination</text>
+
+  <rect x="480" y="506" width="170" height="74" rx="10" class="box"/>
+  <text x="494" y="530" class="h">Effects</text>
+  <text x="494" y="549" class="s">once · reminders, webhooks,</text>
+  <text x="494" y="565" class="s">Gmail drafts, app calendar</text>
+
+  <!-- column C: retrieval and the local LLM path -->
+  <rect x="690" y="210" width="180" height="80" rx="10" class="box"/>
+  <text x="706" y="234" class="h">Retrieval</text>
+  <text x="706" y="252" class="s">BM25 · voyage-4-nano (CPU)</text>
+  <text x="706" y="267" class="s">hybrid · Atlas modes</text>
+  <text x="706" y="282" class="tiny">every step traced</text>
+
+  <rect x="690" y="310" width="180" height="62" rx="10" fill="#fef2f2" stroke="#dc2626"/>
+  <text x="706" y="333" class="h">Untrusted-data fence</text>
+  <text x="706" y="351" class="s">mail, notes, feeds: flagged;</text>
+  <text x="706" y="365" class="s">AI-aimed mail kept out</text>
+
+  <rect x="690" y="392" width="180" height="62" rx="10" class="box"/>
+  <text x="706" y="415" class="h">Ollama (local LLM)</text>
+  <text x="706" y="433" class="s">drafts in 4 languages</text>
+  <text x="706" y="447" class="s">text only · never gets tools</text>
+
+  <!-- storage -->
+  <rect x="40" y="620" width="210" height="66" rx="10" fill="#f8fafc" stroke="#334155"/>
+  <text x="56" y="646" class="h">Token vault</text>
+  <text x="56" y="666" class="s">AES-256-GCM · key outside DB</text>
+
+  <rect x="290" y="620" width="580" height="66" rx="10" fill="#f8fafc" stroke="#334155"/>
+  <text x="306" y="646" class="h">SQLite (node:sqlite) · migrations · backups</text>
+  <text x="306" y="666" class="s">schedules · approvals · activity log · documents · local vectors · reminders</text>
+
+  <!-- cloud services -->
+  <rect x="930" y="130" width="310" height="86" rx="10" fill="#ecfdf5" stroke="#00684a" stroke-width="1.6"/>
+  <text x="946" y="155" class="h" fill="#00684a">MongoDB Atlas (M0)</text>
+  <text x="946" y="174" class="s">chunk = text + metadata + vector</text>
+  <text x="946" y="190" class="s">$vectorSearch · $rankFusion (hybrid)</text>
+  <text x="946" y="206" class="s">demo corpus + notes you choose to share</text>
+
+  <rect x="930" y="232" width="310" height="70" rx="10" fill="#f5f3ff" stroke="#6a3fd1" stroke-width="1.6"/>
+  <text x="946" y="257" class="h" fill="#6a3fd1">Voyage AI API</text>
+  <text x="946" y="276" class="s">voyage-4-lite embeddings · rerank-3-lite</text>
+  <text x="946" y="292" class="s">paced to the free-tier rate limit</text>
+
+  <rect x="930" y="326" width="310" height="84" rx="10" class="box"/>
+  <text x="946" y="350" class="h">Google</text>
+  <text x="946" y="369" class="s">read-only: gmail.readonly · calendar.events</text>
+  <text x="946" y="385" class="s">writes: Gmail drafts + app calendar (approved)</text>
+  <text x="946" y="400" class="tiny">exact request allowlist · nothing is ever sent</text>
+
+  <rect x="930" y="426" width="310" height="66" rx="10" class="box"/>
+  <text x="946" y="450" class="h">Automation webhooks</text>
+  <text x="946" y="470" class="s">Zapier · Make · n8n · IFTTT</text>
+  <text x="946" y="484" class="tiny">approved calls only · URL-bound</text>
+
+  <rect x="930" y="508" width="310" height="66" rx="10" class="box"/>
+  <text x="946" y="532" class="h">Public data &amp; push</text>
+  <text x="946" y="552" class="s">RSS feeds · Open-Meteo weather · ntfy</text>
+  <text x="946" y="566" class="tiny">https only · connect-time IP checks</text>
+
+  <text x="930" y="612" class="tiny">- - -  voyage-4-nano (local) and voyage-4-lite (API)</text>
+  <text x="930" y="628" class="tiny">share one embedding space: a question embedded</text>
+  <text x="930" y="644" class="tiny">locally can search the Atlas index directly.</text>
+
+  <!-- entry points -->
+  <path class="ln" d="M250 162 H288" marker-end="url(#a)"/>
+  <path class="ln" d="M250 238 H288" marker-end="url(#a)"/>
+  <path class="ln" d="M250 385 H288" marker-end="url(#a)"/>
+
+  <!-- core chain -->
+  <path class="ln" d="M470 194 V208" marker-end="url(#a)"/>
+  <path class="ln" d="M470 266 V277 M340 277 H600 Q608 277 608 285 M340 277 Q332 277 332 285"/>
+  <path class="ln" d="M332 284 V288" marker-end="url(#a)"/>
+  <path class="ln" d="M424 277 V288" marker-end="url(#a)"/>
+  <path class="ln" d="M516 277 V288" marker-end="url(#a)"/>
+  <path class="ln" d="M608 284 V288" marker-end="url(#a)"/>
+  <path class="ln" d="M332 334 V338 Q332 346 340 346 H600 Q608 346 608 338 V334 M424 334 V346 M516 334 V346"/>
+  <path class="ln" d="M470 346 V358" marker-end="url(#a)"/>
+  <path class="ln" d="M470 410 V426" marker-end="url(#a)"/>
+  <path class="ln" d="M375 484 V504" marker-end="url(#a)"/>
+  <path class="ln" d="M460 543 H478" marker-end="url(#a)"/>
+  <path class="ln" d="M565 580 V618" marker-end="url(#a)"/>
+  <path class="ln" d="M250 653 H288" stroke-dasharray="4 4"/>
+
+  <!-- API → retrieval -->
+  <path class="ln" d="M650 150 H770 Q780 150 780 160 V208" marker-end="url(#a)"/>
+  <!-- untrusted data on its way to the LLM: from retrieval and from the Chief of Staff's briefing data -->
+  <path d="M780 290 V308" fill="none" stroke="#dc2626" stroke-width="1.6" marker-end="url(#aR)"/>
+  <path d="M650 238 H664 Q674 238 674 248 V331 Q674 341 684 341 H688" fill="none" stroke="#dc2626" stroke-width="1.6" stroke-linejoin="round" marker-end="url(#aR)"/>
+  <path class="ln" d="M780 372 V390" marker-end="url(#a)"/>
+
+  <!-- retrieval → Atlas / Voyage -->
+  <path d="M870 226 H884 Q894 226 894 216 V183 Q894 173 904 173 H928" fill="none" stroke="#00684a" stroke-width="1.8" stroke-linejoin="round" marker-end="url(#aG)"/>
+  <path d="M870 260 H928" fill="none" stroke="#6a3fd1" stroke-width="1.8" marker-end="url(#aV)"/>
+  <path d="M870 280 H928" fill="none" stroke="#6a3fd1" stroke-width="1.4" stroke-dasharray="5 4"/>
+
+  <!-- tool registry and approved effects → external services, one checked path -->
+  <path class="ln" d="M650 395 H654 Q662 395 662 403 V590 Q662 600 672 600 H888 Q898 600 898 590 V378 Q898 368 908 368 H928" marker-end="url(#a)"/>
+  <path class="ln" d="M650 560 H662"/>
+  <path class="ln" d="M898 459 H928" marker-end="url(#a)"/>
+  <path class="ln" d="M898 541 H928" marker-end="url(#a)"/>
+  <text x="690" y="510" class="lbl">Integration tools &amp; approved effects</text>
+  <text x="690" y="526" class="tiny">gmail · gcal · news · weather · webhooks</text>
+  <text x="690" y="540" class="tiny">each call permission-checked;</text>
+  <text x="690" y="553" class="tiny">drafts, app calendar &amp; webhooks only after</text>
+  <text x="690" y="566" class="tiny">your approval of the exact content</text>
+
+  <text x="40" y="752" class="tiny">Arrows show request flow. Red = untrusted content on its way to the LLM. 🔒 = server-side checkpoint that a UI toggle alone cannot bypass.</text>
+  <text x="40" y="768" class="tiny">Local mode needs no credentials and costs $0; cloud services are free tiers, used only when configured and confirmed.</text>
+</svg>
