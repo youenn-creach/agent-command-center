@@ -322,17 +322,37 @@ export async function runCommand(ctx: Ctx, rawText: string, workflows: WorkflowR
   return reply;
 }
 
+/**
+ * Background requests run one at a time, in the order they were asked: the local model does one job
+ * well on a laptop CPU, and two jobs on different models would keep unloading each other's model.
+ * Held on globalThis so every route of this process shares the one queue.
+ */
+const background = ((globalThis as { __accBackground?: { tail: Promise<void>; pending: number } }).__accBackground ??= { tail: Promise.resolve(), pending: 0 });
+/** Longer than any request's own model deadlines; past it, the queue moves on rather than wait forever. */
+const BACKGROUND_MAX_MS = 60 * 60_000;
+
 /** Background work: progress and the final answer go to the request board, plus a notification. */
-function runInBackground(ctx: Ctx, id: string, text: string, work: NonNullable<CommandResult["background"]>) {
-  void (async () => {
+export function runInBackground(ctx: Ctx, id: string, text: string, work: NonNullable<CommandResult["background"]>) {
+  const ahead = background.pending++;
+  if (ahead > 0) setRequestProgress(ctx, id, `Waiting for ${ahead === 1 ? "your other request" : `${ahead} other requests`} to finish…`);
+  background.tail = background.tail.then(async () => {
+    let timer: NodeJS.Timeout | undefined;
     try {
-      const out = await work((p) => setRequestProgress(ctx, id, p));
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("it took more than an hour")), BACKGROUND_MAX_MS);
+        timer.unref();
+      });
+      setRequestProgress(ctx, id, "Starting…");
+      const out = await Promise.race([work((p) => setRequestProgress(ctx, id, p)), deadline]);
       finishRequest(ctx, id, { ok: true, reply: out.reply, items: out.items, actionId: out.actionId });
       void notify(ctx, { key: `answer:${id}`, kind: "answer", title: "Your request is ready", summary: "The Chief of Staff finished a request.", detail: text.slice(0, 120) });
     } catch (err) {
       finishRequest(ctx, id, { ok: false, reply: `This didn't work: ${err instanceof Error ? err.message.slice(0, 200) : "unknown error"}` });
+    } finally {
+      clearTimeout(timer);
+      background.pending--;
     }
-  })();
+  });
 }
 
 /** Commands with an exact form ("add event: …", "draft reply to Ana: …") run without the model. */
@@ -367,10 +387,12 @@ function eventText(text: string) {
 const MAIL_WORD = /\b(e-?mails?|mail|inbox|gmail)\b/i;
 const TO_CALENDAR = /\b(add|put|save|create)\b.*\b(calendar|agenda)\b/i;
 const FLIGHT_WORD = /\b(flights?|planes?|plane tickets)\b/i;
+// "Remind me to chase Laura on Monday" is a reminder for the user, even though it names someone to chase.
+const SELF_REMINDER = /\b(remind (?:me|myself)|don'?t let me forget|set (?:a|me a) reminder|add a (?:reminder|to-?do|task))\b/i;
 
 async function runSkill(ctx: Ctx, text: string, route: Route, workflows: WorkflowRegistry): Promise<CommandResult> {
   // The model sometimes over-picks a chain: without its second half in the request, it's the plain skill.
-  const someoneElse = text.match(/\b(?:send (?:a )?(?:reminder|nudge) to|remind|chase)\s+(?!me\b|myself\b)([A-Z][\p{L}'-]+)/u);
+  const someoneElse = SELF_REMINDER.test(text) ? null : text.match(/\b(?:send (?:a )?(?:reminder|nudge) to|remind|chase)\s+(?!me\b|myself\b)([A-Z][\p{L}'-]+)/u);
   if ((route.skill === "reminder_from_email" || route.skill === "reminder") && someoneElse) route = { skill: "nudge", args: { who: someoneElse[1] } };
   else if (route.skill === "reminder_from_email" && !MAIL_WORD.test(text) && !/\b(bills?|invoices?|renewal|renew|expires?|deadline|due|payment)\b/i.test(text)) route = { skill: "reminder", args: {} };
   else if (route.skill === "reply_and_add" && !TO_CALENDAR.test(text) && !/\b(calendar|agenda|schedule)\b/i.test(text)) route = { skill: "draft_reply", args: route.args };
@@ -444,7 +466,8 @@ async function runSkill(ctx: Ctx, text: string, route: Route, workflows: Workflo
       const who = a.who?.trim();
       if (!who) return { intent: "reply_and_add", reply: "Who should I reply to? e.g. “tell Laura yes for dinner and add it to my calendar”." };
       if (!isConnected(ctx, "gmail")) return { intent: "reply_and_add", reply: "Gmail isn't connected, so I can't find the email to reply to. Connect it in Connections & Permissions.", section: "permissions" };
-      const message = a.message?.trim() || text;
+      // The writer gets the user's own request, not the model's paraphrase of it (as for draft_reply).
+      const message = text;
       return later("reply_and_add", `Writing the reply to ${who} and finding the event in their email. Both will wait for your approval; the answer will appear under “Your requests” on Today.`, async (p) => {
         const reply = await draftReplyFree(ctx, who, message, p);
         const event = await eventFromEmail(ctx, text, `from:"${who.replace(/"/g, "")}" newer_than:90d`, p);
@@ -458,7 +481,7 @@ async function runSkill(ctx: Ctx, text: string, route: Route, workflows: Workflo
     }
     case "reminder": {
       // "Send a reminder to Tom…", "remind Laura…" are about someone else: a nudge, not a to-do for the user.
-      const other = text.match(/\b(?:send (?:a )?(?:reminder|nudge) to|remind|chase)\s+(?!me\b|myself\b)([A-Z][\p{L}'-]+)/u);
+      const other = SELF_REMINDER.test(text) ? null : text.match(/\b(?:send (?:a )?(?:reminder|nudge) to|remind|chase)\s+(?!me\b|myself\b)([A-Z][\p{L}'-]+)/u);
       if (other) return answer("nudge", await nudge(ctx, other[1]));
       return answer("reminder", reminderFromText(ctx, text));
     }

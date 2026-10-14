@@ -3,14 +3,14 @@ import { all, one, run } from "@/server/db";
 import { reloadConfig } from "@/server/config";
 import { handleCallback, SCOPES, startAuth, type Fetcher } from "@/server/connectors/google";
 import { setAgentLevel, setServiceLevel } from "@/server/policy/permissions";
-import { eventFromEmail, runCommand } from "@/server/agents/command";
+import { eventFromEmail, runCommand, runInBackground } from "@/server/agents/command";
 import { workflows } from "@/server/agents/chiefOfStaff";
 import { emailQuestion, findEventInEmail, meetingPrep, quickRoute, routeRequest, webAnswer, widenQuery, type Route } from "@/server/agents/assistant";
 import { pageText, readPage } from "@/server/connectors/websearch";
 import { deadline, deadlinesToReminders, leadDays, nudgeAll, prepDay, reminderFromEmail, tripWeather } from "@/server/agents/chains";
 import { setLocation } from "@/server/connectors/weather";
 import { isStale, latestDate, reviewInbox, Verdict } from "@/server/agents/inboxReview";
-import { listRequests } from "@/server/requests";
+import { listRequests, processRun } from "@/server/requests";
 import type { LlmProvider } from "@/server/llm";
 import { failingLlm, seededCtx } from "./helpers";
 
@@ -562,7 +562,8 @@ describe("one request, several steps", () => {
     const out = await reminderFromEmail(ctx, text, "electricity bill", () => {}, llm);
     expect(out.reply).toMatch(/^Added to your reminders: “Pay the electricity bill of 64.20 EUR”, due Tue 20 Oct\. I'll remind you Sun 18 Oct at 09:00\. Source: “Tu factura de octubre” \(Endesa\)\./);
     expect(llm.prompts[0]).toMatch(/<untrusted source="email \[1\] from Endesa/);
-    expect(reminders(ctx)).toEqual([{ text: "Pay the electricity bill of 64.20 EUR (due Tue 20 Oct)", due_at: "2026-10-18T07:00:00.000Z" }]);
+    // The reminder says which email it came from, so a phishing "action" can't pass for the user's own to-do.
+    expect(reminders(ctx)).toEqual([{ text: "Pay the electricity bill of 64.20 EUR (due Tue 20 Oct) — from Endesa: “Tu factura de octubre”", due_at: "2026-10-18T07:00:00.000Z" }]);
     expect((await reminderFromEmail(ctx, text, "electricity bill", () => {}, llm)).reply).toMatch(/^Already in your reminders/);
     expect(reminders(ctx)).toHaveLength(1);
     const late = await reminderFromEmail(ctx, text, "electricity bill", () => {}, stub({ found: true, source: 1, task: "Pay the September bill", due: "2026-10-01" }));
@@ -580,7 +581,7 @@ describe("one request, several steps", () => {
     });
     const out = await deadlinesToReminders(ctx, 7, () => {}, judge);
     expect(out.reply).toMatch(/^2 reminders added from your emails of the last 7 days/);
-    expect(reminders(ctx).map((r) => r.text).sort()).toEqual(["Pay the Endesa bill of 64.20 EUR (due Tue 20 Oct)", "Reply to Laura about Saturday's dinner"]);
+    expect(reminders(ctx).map((r) => r.text).sort()).toEqual(["Pay the Endesa bill of 64.20 EUR (due Tue 20 Oct) — from Endesa: “Tu factura de octubre”", "Reply to Laura about Saturday's dinner — from Laura: “Dinner on Saturday?”"]);
     expect((await deadlinesToReminders(ctx, 7, () => {}, judge)).reply).toMatch(/^0 reminders added .*\(2 already there\)/);
   });
 
@@ -611,10 +612,13 @@ describe("one request, several steps", () => {
     run(ctx.db, "DELETE FROM events");
     run(ctx.db, "INSERT INTO events (id, title, starts_at, ends_at, location, is_demo, source) VALUES ('p1','Client call','2026-10-13T08:00:00Z','2026-10-13T09:00:00Z',NULL,1,'demo'),('p2','Lunch with Laura','2026-10-13T11:00:00Z','2026-10-13T12:00:00Z',NULL,1,'demo'),('p3','Holiday','2026-10-13T00:00:00Z','2026-10-14T00:00:00Z',NULL,1,'demo')");
     const llm = stub({});
-    llm.generate = async (_s, user) => ({ text: `Brief: ${user.match(/Meeting with or about: (.+)/)?.[1]}`, model: "s", ms: 1 });
+    const prompts: string[] = [];
+    llm.generate = async (_s, user) => (prompts.push(user), { text: `Brief: ${user.match(/Meeting with or about: (.+)/)?.[1]}`, model: "s", ms: 1 });
     const out = await prepDay(ctx, "prep me for tomorrow's meetings", () => {}, llm);
     expect(out.reply).toBe("Briefs for 2 meetings:");
     expect(out.items?.map((i) => i.detail)).toEqual(["Brief: Client call", "Brief: Lunch with Laura"]);
+    // Invitations are written by other people: the calendar entry reaches the model as untrusted data.
+    expect(prompts[0]).toMatch(/<untrusted source="calendar entry"/);
   });
 
   it("drafts one follow-up per conversation waiting for an answer, each for approval", async () => {
@@ -625,6 +629,15 @@ describe("one request, several steps", () => {
     expect(out.reply).toMatch(new RegExp(`^Drafted ${Math.min(5, waiting)} follow-up`));
     expect(all<{ status: string }>(ctx.db, "SELECT status FROM actions WHERE title LIKE 'Follow-up to %'").every((a) => a.status === "proposed")).toBe(true);
     expect(all(ctx.db, "SELECT 1 FROM actions WHERE title LIKE 'Follow-up to %'")).toHaveLength(Math.min(5, waiting));
+  });
+
+  it("says which follow-ups it couldn't draft instead of hiding the ones it did", async () => {
+    const ctx = seededCtx(new Date(NOW));
+    run(ctx.db, "DELETE FROM waiting_on");
+    run(ctx.db, "INSERT INTO waiting_on (thread_id, recipient, subject, sent_at, rfc_message_id, is_demo) VALUES ('d1', 'Priya Shah <priya@example.com>', 'Quote', ?, NULL, 1), ('g1', 'Marc <marc@example.com>', 'Apartment', ?, NULL, 0)", new Date(NOW - 6 * 86_400_000).toISOString(), new Date(NOW - 5 * 86_400_000).toISOString());
+    const out = await nudgeAll(ctx);
+    expect(out.reply).toMatch(/^Drafted 1 follow-up, .*\(1 couldn't be drafted: see below\)/);
+    expect(out.items?.map((i) => i.title)).toEqual(["Follow-up to Priya Shah", "✗ Not drafted: Marc"]);
   });
 
   it("routes the two-step requests even when the model picks only one step", async () => {
@@ -642,10 +655,42 @@ describe("one request, several steps", () => {
       ["send a reminder to Tom about the photos", { skill: "reminder_from_email", args: { query: "Tom photos" } }, "nudge"],
       ["remind me to water the plants on sunday", { skill: "reminder_from_email", args: { query: "plants" } }, "reminder"],
       ["add my dentist appointment from the confirmation email to my calendar", { skill: "event_from_email", args: { query: "dentist appointment confirmation" } }, "event_from_email"],
+      ["remind me to chase Laura on monday", { skill: "reminder", args: {} }, "reminder"],
     ];
     for (const [text, route, want] of cases) {
       const r = await runCommand(ctx, text, workflows, router({ [text]: route }));
       expect(r.intent, text).toBe(want);
     }
+  });
+});
+
+describe("requests that run in the background", () => {
+  const insert = (ctx: ReturnType<typeof seededCtx>, id: string, owner: string | null) =>
+    run(ctx.db, "INSERT INTO requests (id, text, intent, reply, created_at, status, progress, owner) VALUES (?, ?, 'web_search', 'On it', ?, 'working', 'Starting…', ?)", id, `question ${id}`, new Date().toISOString(), owner);
+
+  it("run one at a time, in order, and say they're waiting", async () => {
+    const ctx = seededCtx();
+    insert(ctx, "q1", processRun());
+    insert(ctx, "q2", processRun());
+    const started: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    runInBackground(ctx, "q1", "first", async () => (started.push("q1"), await gate, { reply: "first answer" }));
+    runInBackground(ctx, "q2", "second", async () => (started.push("q2"), { reply: "second answer" }));
+    await vi.waitFor(() => expect(started).toEqual(["q1"]));
+    expect(listRequests(ctx).find((r) => r.id === "q2")?.status).toBe("Waiting for your other request to finish…");
+    release();
+    await vi.waitFor(() => expect(listRequests(ctx).find((r) => r.id === "q2")?.state).toBe("done"));
+    expect(started).toEqual(["q1", "q2"]);
+    expect(listRequests(ctx).find((r) => r.id === "q1")?.answer?.reply).toBe("first answer");
+  });
+
+  it("a request left running by a restart is marked interrupted, not working forever", () => {
+    const ctx = seededCtx();
+    insert(ctx, "old", "a-previous-run");
+    insert(ctx, "now", processRun());
+    const rows = listRequests(ctx);
+    expect(rows.find((r) => r.id === "old")).toMatchObject({ state: "failed", reply: "Interrupted: the app restarted while this was running. Ask again." });
+    expect(rows.find((r) => r.id === "now")?.state).toBe("working");
   });
 });

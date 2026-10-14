@@ -800,7 +800,8 @@ export async function meetingPrep(ctx: Ctx, text: string, who: string, progress:
   if (!event && !read.length && !notes.length) return { reply: `I found nothing about “${who}” in your calendar (${range.label}), recent email or notes.` };
   progress("Writing the brief…");
   const material = [
-    event ? `Calendar: ${event.title}${event.detail ? ` (${event.detail})` : ""}` : `Calendar: no event matching “${who}” found.`,
+    // Invitations are written by other people: the calendar entry is untrusted data like an email.
+    event ? fenceUntrusted("calendar entry", `${event.title}${event.detail ? ` (${event.detail})` : ""}`) : `Calendar: no event matching “${who}” found.`,
     ...read.map((r) => fenceUntrusted(`email [${r.n}] from ${r.sender}`, `Subject: ${r.subject}\nDate: ${r.date.slice(0, 10)}\n\n${r.text}`)),
     ...notes.map((n) => fenceUntrusted(`note: ${n.title}`, n.text)),
   ].join("\n\n");

@@ -73,7 +73,7 @@ export interface ReviewOutcome {
   items: { title: string; detail?: string }[];
   counts: { read: number; action: number; bulk: number; flagged: number; failed: number };
   /** For evaluation: what the subject scan picked and each verdict (never shown in the app). */
-  trace: { candidates: string[]; picked: string[]; verdicts: { subject: string; verdict: Verdict | null; error?: string }[] };
+  trace: { candidates: string[]; picked: string[]; verdicts: { subject: string; sender?: string; verdict: Verdict | null; error?: string }[] };
 }
 
 const RANK = { high: 0, medium: 1, low: 2 } as const;
@@ -202,6 +202,6 @@ export async function reviewInbox(ctx: Ctx, days: number, progress: (s: string) 
     reply: parts.join(" "),
     items,
     counts: { read: reviewed.length, action: actions.length, bulk: bulk.length, flagged, failed },
-    trace: { candidates: candidates.map((m) => m.subject), picked: toRead.map((m) => m.subject), verdicts: [...reviewed.map((r) => ({ subject: r.subject, verdict: r.verdict })), ...errors.map((e) => ({ ...e, verdict: null }))] },
+    trace: { candidates: candidates.map((m) => m.subject), picked: toRead.map((m) => m.subject), verdicts: [...reviewed.map((r) => ({ subject: r.subject, sender: r.sender, verdict: r.verdict })), ...errors.map((e) => ({ ...e, verdict: null }))] },
   };
 }

@@ -226,6 +226,13 @@ export const MIGRATIONS: Migration[] = [
       VALUES ('web-search', 'Web search (SearXNG, on this computer)', 'Private web search through your own SearXNG: queries go to public search engines without an account; pages are read from public addresses only. Results are untrusted.', 'real', 'connected', 'none', 'read', '["search.read","page.read"]', NULL);
     `,
   },
+  {
+    version: 19,
+    description: "Requests running in the background remember which run of the app owns them (a restart orphans them)",
+    sql: `
+      ALTER TABLE requests ADD COLUMN owner TEXT;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.at(-1)?.version ?? 1;

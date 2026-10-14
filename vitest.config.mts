@@ -7,6 +7,8 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["tests/**/*.test.ts"],
+    setupFiles: ["tests/setup.ts"],
+    sequence: { hooks: "list" },
     env: {
       ACC_TIMEZONE: "Europe/Paris",
       // Nothing listens there: unit tests never call a real local model (they pass stubs where they need one).

@@ -40,6 +40,9 @@ export function leadDays(text: string): number {
   return 2;
 }
 
+/** Where a reminder made from an email came from, so a phishing "call this number" can't pass for the user's own to-do. */
+const fromEmail = (sender: string | undefined, subject: string) => ` — from ${sender ? (parseSender(sender).name ?? sender.replace(/\s*<[^>]*>/, "")) : "an email"}: “${subject.slice(0, 80)}”`;
+
 /** Adds a reminder unless the same one is already open; returns whether it was added. */
 function remindOnce(ctx: Ctx, text: string, dueAt: string | undefined): boolean {
   if (one(ctx.db, "SELECT 1 FROM reminders WHERE done_at IS NULL AND lower(text) = lower(?)", text.trim().slice(0, 500))) return false;
@@ -112,18 +115,19 @@ export async function reminderFromEmail(ctx: Ctx, text: string, query: string, p
   if (!f.found || !task) return { reply: "I found related emails, but none says what you need to do, so I didn't add a reminder. They're listed below.", items };
   const src = read.find((r) => r.n === f.source) ?? read[0];
   const cite = `“${src.subject}” (${parseSender(src.sender).name ?? src.sender})`;
+  const origin = fromEmail(src.sender, src.subject);
   const due = realDay(f.due);
   if (!due) {
-    const added = remindOnce(ctx, task, undefined);
+    const added = remindOnce(ctx, `${task}${origin}`, undefined);
     return { reply: `${added ? "Added to your reminders" : "Already in your reminders"}: “${task}”. The email gives no deadline, so it has no date. Source: ${cite}.`, items, section: "today" };
   }
   const today = localToday(ctx.now(), tz());
   if (ymd(due) < ymd(today)) {
-    const added = remindOnce(ctx, `${task} (was due ${dayName(due)})`, ctx.now().toISOString());
+    const added = remindOnce(ctx, `${task} (was due ${dayName(due)})${origin}`, ctx.now().toISOString());
     return { reply: `${added ? "Added to your reminders, due now" : "Already in your reminders"}: “${task}”. Careful: the deadline, ${dayName(due)}, has passed. Source: ${cite}.`, items, section: "today" };
   }
   const when = remindAt(ctx, due, leadDays(text));
-  const added = remindOnce(ctx, `${task} (due ${dayName(due)})`, when.dueAt);
+  const added = remindOnce(ctx, `${task} (due ${dayName(due)})${origin}`, when.dueAt);
   return { reply: `${added ? "Added to your reminders" : "Already in your reminders"}: “${task}”, due ${dayName(due)}. I'll remind you ${when.label}. Source: ${cite}.`, items, section: "today" };
 }
 
@@ -134,11 +138,11 @@ export async function deadlinesToReminders(ctx: Ctx, days: number, progress: (s:
   if (!actions.length) return { reply: `${review.reply} So there's no reminder to add.`, items: review.items };
   const items: { title: string; detail?: string }[] = [];
   let added = 0;
-  for (const { subject, verdict } of actions) {
+  for (const { subject, sender, verdict } of actions) {
     const due = deadline(verdict!.due, ctx.now());
     const when = due ? remindAt(ctx, due, 1) : null;
     const text = `${verdict!.action}${due ? ` (due ${dayName(due)})` : ""}`;
-    const isNew = remindOnce(ctx, text, when?.dueAt);
+    const isNew = remindOnce(ctx, `${text}${fromEmail(sender, subject)}`, when?.dueAt);
     if (isNew) added++;
     items.push({ title: `${isNew ? "＋" : "✓"} ${text}`, detail: `“${subject}”${when ? ` · reminder ${when.label}` : " · no deadline in the email"}${isNew ? "" : " · already in your reminders"}` });
   }
@@ -204,19 +208,24 @@ export async function nudgeAll(ctx: Ctx): Promise<SkillAnswer> {
   const rows = all<{ thread_id: string; recipient: string; subject: string }>(ctx.db, `SELECT thread_id, recipient, subject FROM waiting_on WHERE 1 = 1${demoRowsFilter()} ORDER BY sent_at LIMIT 5`);
   if (!rows.length) return { reply: `Nobody owes you an answer right now, so there's nobody to chase.${note ? ` ${note}` : ""}`, section: "insights" };
   const items: { title: string; detail?: string }[] = [];
+  const problems = new Set<string>();
   let first: string | undefined;
   for (const r of rows) {
+    const to = r.recipient.replace(/\s*<[^>]*>/, "");
     try {
       const { actionId } = await proposeNudge(ctx, r.thread_id);
       first ??= actionId;
-      items.push({ title: `Follow-up to ${r.recipient.replace(/\s*<[^>]*>/, "")}`, detail: `“${r.subject}”` });
+      items.push({ title: `Follow-up to ${to}`, detail: `“${r.subject}”` });
     } catch (err) {
-      if (err instanceof InsightError) return { reply: err.message, section: "permissions" };
-      throw err;
+      if (!(err instanceof InsightError)) throw err;
+      problems.add(err.message);
+      items.push({ title: `✗ Not drafted: ${to}`, detail: `“${r.subject}” · ${err.message}` });
     }
   }
+  const drafted = items.length - [...items].filter((i) => i.title.startsWith("✗")).length;
+  if (!drafted) return { reply: [...problems].join(" "), items, section: "permissions" };
   return {
-    reply: `Drafted ${items.length} follow-up${items.length === 1 ? "" : "s"}, one per conversation waiting for an answer. Review them in the Action Queue: nothing is sent until you approve each one.${note ? ` ${note}` : ""}`,
+    reply: `Drafted ${drafted} follow-up${drafted === 1 ? "" : "s"}, one per conversation waiting for an answer${drafted < items.length ? ` (${items.length - drafted} couldn't be drafted: see below)` : ""}. Review them in the Action Queue: nothing is sent until you approve each one.${note ? ` ${note}` : ""}`,
     items,
     actionId: first,
     section: "actions",
