@@ -5,7 +5,9 @@ import { handleCallback, SCOPES, startAuth, type Fetcher } from "@/server/connec
 import { setAgentLevel, setServiceLevel } from "@/server/policy/permissions";
 import { eventFromEmail, runCommand } from "@/server/agents/command";
 import { workflows } from "@/server/agents/chiefOfStaff";
-import { emailQuestion, findEventInEmail, meetingPrep, quickRoute, routeRequest, widenQuery, type Route } from "@/server/agents/assistant";
+import { emailQuestion, findEventInEmail, meetingPrep, quickRoute, routeRequest, webAnswer, widenQuery, type Route } from "@/server/agents/assistant";
+import { pageText, readPage } from "@/server/connectors/websearch";
+import { deadline, deadlinesToReminders, leadDays, nudgeAll, prepDay, reminderFromEmail, tripWeather } from "@/server/agents/chains";
 import { setLocation } from "@/server/connectors/weather";
 import { isStale, latestDate, reviewInbox, Verdict } from "@/server/agents/inboxReview";
 import { listRequests } from "@/server/requests";
@@ -191,16 +193,10 @@ describe("skills", () => {
 
   it("is honest about what it can't do, and the board shows it as not possible yet", async () => {
     const ctx = seededCtx();
-    const llm = router({
-      "who won the match last night?": { skill: "web_search", args: { query: "match last night" } },
-      "order me a pizza": { skill: "unsupported", args: { reason: "ordering food" } },
-    });
-    const a = await runCommand(ctx, "who won the match last night?", workflows, llm);
-    expect(a).toMatchObject({ intent: "web_search", unsupported: true });
-    expect(a.reply).toMatch(/can't search the internet yet/);
+    const llm = router({ "order me a pizza": { skill: "unsupported", args: { reason: "ordering food" } } });
     const b = await runCommand(ctx, "order me a pizza", workflows, llm);
     expect(b.reply).toMatch(/I can't do that yet \(ordering food\)/);
-    expect(listRequests(ctx).slice(0, 2).map((r) => r.status)).toEqual(["Not possible yet", "Not possible yet"]);
+    expect(listRequests(ctx)[0].status).toBe("Not possible yet");
   });
 
   it("adds an event from a free-form request, keeping the day and time", async () => {
@@ -421,7 +417,7 @@ describe("an event from the mail, into the calendar", () => {
     const llm: LlmProvider = { id: "e", label: "e", generate: async (_s, user) => (prompts.push(user), { text: JSON.stringify(answer), model: "e", ms: 1 }) };
     return { llm, prompts };
   };
-  const race = { found: true, email: 1, title: "Sant Silvestre 10K", date: "2026-12-31", start: "17:30", end: "", location: "Plaça Major" };
+  const race = { found: true, source: 1, title: "Sant Silvestre 10K", date: "2026-12-31", start: "17:30", end: "", location: "Plaça Major" };
 
   it("searches in the email's languages too", () => {
     expect(widenQuery("race registration")).toBe("(race OR carrera OR cursa OR course) (registration OR inscripcion OR inscripcio OR inscription)");
@@ -474,5 +470,177 @@ describe("an event from the mail, into the calendar", () => {
     const { ctx } = await withGmail();
     const out = await findEventInEmail(ctx, "add my yoga retreat from my email to my calendar", "\"yoga retreat\"", () => {}, extractor(race).llm);
     expect(out).toMatchObject({ reply: expect.stringMatching(/found no email matching/) });
+  });
+});
+
+describe("web search (the user's own SearXNG)", () => {
+  // http:// links can't be read (https only), so these tests never leave the machine: answers use the snippets.
+  const SEARX = { results: [
+    { title: "2026 final - Wikipedia", url: "http://en.wikipedia.example/final", content: "Spain beat Argentina 1-0 after extra time in the final." },
+    { title: "Final report", url: "http://news.example/final", content: "Spain are the champions." },
+    { title: "Duplicate", url: "http://news.example/final", content: "same link again" },
+    { title: "Not a web link", url: "ftp://files.example/x", content: "" },
+  ] };
+
+  it("is off until the Knowledge agent is given Read on Web search", async () => {
+    const ctx = seededCtx();
+    const out = await webAnswer(ctx, "who won the final?", "who won the final", () => {}, failingLlm);
+    expect(out.reply).toMatch(/Web search is off/);
+  });
+
+  it("asks only the local SearXNG, then answers from the results with numbered sources", async () => {
+    const ctx = seededCtx();
+    setServiceLevel(ctx, "web-search", "read");
+    setAgentLevel(ctx, "knowledge", "web-search", "read");
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => (urls.push(url), Response.json(SEARX)));
+    let prompt = "";
+    const llm: LlmProvider = { id: "w", label: "w", generate: async (_s, user) => ((prompt = user), { text: "Spain won the final 1-0 against Argentina [1][2].", model: "w", ms: 1 }) };
+    const out = await webAnswer(ctx, "who won the final?", "who won the final", () => {}, llm);
+    expect(urls).toHaveLength(1);
+    expect(new URL(urls[0]).origin).toBe("http://127.0.0.1:8888");
+    expect(new URL(urls[0]).searchParams.get("q")).toBe("who won the final");
+    expect(out.reply).toBe("Spain won the final 1-0 against Argentina [1][2].");
+    expect(out.items?.map((i) => i.title)).toEqual(["[1] 2026 final - Wikipedia", "[2] Final report"]);
+    expect(out.items?.[0].href).toBe("http://en.wikipedia.example/final");
+    expect(prompt).toMatch(/^Today is \d{4}-\d{2}-\d{2}\./);
+    expect(prompt).toMatch(/<untrusted source="web result \[1\] en\.wikipedia\.example"/);
+  });
+
+  it("says how to start the search service when it isn't running", async () => {
+    const ctx = seededCtx();
+    setServiceLevel(ctx, "web-search", "read");
+    setAgentLevel(ctx, "knowledge", "web-search", "read");
+    vi.stubGlobal("fetch", async () => {
+      throw new TypeError("fetch failed");
+    });
+    const out = await webAnswer(ctx, "who won?", "who won", () => {}, failingLlm);
+    expect(out.reply).toMatch(/systemctl --user start acc-searxng/);
+  });
+
+  it("only talks to a search service on this computer, and only reads public https pages", async () => {
+    vi.stubEnv("ACC_SEARXNG_URL", "https://search.example.com");
+    const ctx = seededCtx();
+    setServiceLevel(ctx, "web-search", "read");
+    setAgentLevel(ctx, "knowledge", "web-search", "read");
+    const out = await webAnswer(ctx, "who won?", "who won", () => {}, failingLlm);
+    expect(out.reply).toMatch(/must run on this computer/);
+    for (const bad of ["http://example.com/", "https://127.0.0.1/", "https://localhost/x", "https://10.0.0.5/", "https://user:pw@example.com/"]) {
+      await expect(readPage(bad)).rejects.toThrow();
+    }
+  });
+
+  it("keeps a page's main text, without menus or scripts", () => {
+    const html = "<html><nav>Home | About</nav><script>evil()</script><main><h1>Opening hours</h1><p>Open 10:00&ndash;19:00, closed Mondays.</p><footer>©</footer></main></html>";
+    expect(pageText(html, 200)).toBe("Opening hours Open 10:00&ndash;19:00, closed Mondays.");
+  });
+});
+
+describe("one request, several steps", () => {
+  const stub = (answer: object | ((system: string, user: string) => object)): LlmProvider & { prompts: string[] } => {
+    const prompts: string[] = [];
+    return { id: "s", label: "s", prompts, generate: async (system, user) => (prompts.push(user), { text: JSON.stringify(typeof answer === "function" ? answer(system, user) : answer), model: "s", ms: 1 }) };
+  };
+  const reminders = (ctx: ReturnType<typeof seededCtx>) => all<{ text: string; due_at: string | null }>(ctx.db, "SELECT text, due_at FROM reminders WHERE source = 'assistant' ORDER BY created_at");
+
+  it("reads how far ahead to remind", () => {
+    expect(leadDays("remind me a week before")).toBe(7);
+    expect(leadDays("3 days before it's due")).toBe(3);
+    expect(leadDays("the day before")).toBe(1);
+    expect(leadDays("before it's due")).toBe(2);
+    expect(deadline("2026-10-20", new Date(NOW))).toEqual({ y: 2026, m: 10, d: 20 });
+    expect(deadline("20 October", new Date(NOW))).toEqual({ y: 2026, m: 10, d: 20 });
+    expect(deadline("next week sometime", new Date(NOW))).toBeNull();
+  });
+
+  it("finds the bill in the mail and sets a reminder ahead of its deadline, once", async () => {
+    vi.stubEnv("ACC_TIMEZONE", "Europe/Madrid");
+    reloadConfig();
+    const { ctx } = await withGmail();
+    const text = "remind me to pay the electricity bill before it's due";
+    const llm = stub({ found: true, source: 1, task: "Pay the electricity bill of 64.20 EUR", due: "2026-10-20" });
+    const out = await reminderFromEmail(ctx, text, "electricity bill", () => {}, llm);
+    expect(out.reply).toMatch(/^Added to your reminders: “Pay the electricity bill of 64.20 EUR”, due Tue 20 Oct\. I'll remind you Sun 18 Oct at 09:00\. Source: “Tu factura de octubre” \(Endesa\)\./);
+    expect(llm.prompts[0]).toMatch(/<untrusted source="email \[1\] from Endesa/);
+    expect(reminders(ctx)).toEqual([{ text: "Pay the electricity bill of 64.20 EUR (due Tue 20 Oct)", due_at: "2026-10-18T07:00:00.000Z" }]);
+    expect((await reminderFromEmail(ctx, text, "electricity bill", () => {}, llm)).reply).toMatch(/^Already in your reminders/);
+    expect(reminders(ctx)).toHaveLength(1);
+    const late = await reminderFromEmail(ctx, text, "electricity bill", () => {}, stub({ found: true, source: 1, task: "Pay the September bill", due: "2026-10-01" }));
+    expect(late.reply).toMatch(/the deadline, Thu 1 Oct, has passed/);
+    const none = await reminderFromEmail(ctx, text, "electricity bill", () => {}, stub({ found: false, source: 1, task: "", due: "" }));
+    expect(none.reply).toMatch(/didn't add a reminder/);
+  });
+
+  it("turns the actions found in this week's mail into reminders", async () => {
+    const { ctx } = await withGmail();
+    const judge = stub((system, user) => {
+      if (system.startsWith("Below is a numbered list")) return { pick: [1, 2] };
+      if (user.includes("factura")) return { needs_action: true, action: "Pay the Endesa bill of 64.20 EUR", due: "20 October", priority: "high", worth_knowing: "" };
+      return { needs_action: true, action: "Reply to Laura about Saturday's dinner", due: "", priority: "medium", worth_knowing: "" };
+    });
+    const out = await deadlinesToReminders(ctx, 7, () => {}, judge);
+    expect(out.reply).toMatch(/^2 reminders added from your emails of the last 7 days/);
+    expect(reminders(ctx).map((r) => r.text).sort()).toEqual(["Pay the Endesa bill of 64.20 EUR (due Tue 20 Oct)", "Reply to Laura about Saturday's dinner"]);
+    expect((await deadlinesToReminders(ctx, 7, () => {}, judge)).reply).toMatch(/^0 reminders added .*\(2 already there\)/);
+  });
+
+  it("gives the forecast for the next trip's destination and dates", async () => {
+    vi.stubEnv("ACC_TIMEZONE", "Europe/Madrid");
+    reloadConfig();
+    const ctx = seededCtx(new Date("2026-11-04T08:00:00Z")); // the demo has a flight BCN → LIS on 7 November
+    setLocation(ctx, { name: "Paris", country: "France", latitude: 48.85, longitude: 2.35, timezone: "Europe/Paris" });
+    setServiceLevel(ctx, "weather", "read");
+    setAgentLevel(ctx, "calendar", "weather", "read");
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      urls.push(url);
+      if (url.includes("geocoding")) return Response.json({ results: [{ name: "Lisbon", country: "Portugal", latitude: 38.72, longitude: -9.14, timezone: "Europe/Lisbon" }] });
+      const days = Array.from({ length: 7 }, (_, i) => new Date(Date.parse("2026-11-04T12:00:00Z") + i * 86_400_000).toISOString().slice(0, 10));
+      return Response.json({ daily: { time: days, weather_code: days.map(() => 0), temperature_2m_max: days.map(() => 22), temperature_2m_min: days.map(() => 15), precipitation_probability_max: days.map(() => 5) } });
+    });
+    const out = await tripWeather(ctx);
+    expect(new URL(urls[0]).searchParams.get("name")).toBe("LIS");
+    expect(out.reply).toMatch(/^Weather in Lisbon, Portugal for your trip \(BCN → LIS, Sat 7 Nov\)/);
+    expect(out.items?.[0]).toEqual({ title: "Saturday 7 Nov", detail: "clear sky, 15–22°C, 5% chance of rain" });
+    const early = await tripWeather(seededCtx(new Date("2026-10-14T08:00:00Z")));
+    expect(early.reply).toMatch(/too far ahead for a forecast .* Ask again from Sun 1 Nov/);
+  });
+
+  it("prepares every timed meeting of the day (three at most)", async () => {
+    const ctx = seededCtx(new Date(NOW));
+    run(ctx.db, "DELETE FROM events");
+    run(ctx.db, "INSERT INTO events (id, title, starts_at, ends_at, location, is_demo, source) VALUES ('p1','Client call','2026-10-13T08:00:00Z','2026-10-13T09:00:00Z',NULL,1,'demo'),('p2','Lunch with Laura','2026-10-13T11:00:00Z','2026-10-13T12:00:00Z',NULL,1,'demo'),('p3','Holiday','2026-10-13T00:00:00Z','2026-10-14T00:00:00Z',NULL,1,'demo')");
+    const llm = stub({});
+    llm.generate = async (_s, user) => ({ text: `Brief: ${user.match(/Meeting with or about: (.+)/)?.[1]}`, model: "s", ms: 1 });
+    const out = await prepDay(ctx, "prep me for tomorrow's meetings", () => {}, llm);
+    expect(out.reply).toBe("Briefs for 2 meetings:");
+    expect(out.items?.map((i) => i.detail)).toEqual(["Brief: Client call", "Brief: Lunch with Laura"]);
+  });
+
+  it("drafts one follow-up per conversation waiting for an answer, each for approval", async () => {
+    const ctx = seededCtx(new Date(NOW));
+    const waiting = all(ctx.db, "SELECT thread_id FROM waiting_on").length;
+    const out = await nudgeAll(ctx);
+    expect(waiting).toBeGreaterThan(0);
+    expect(out.reply).toMatch(new RegExp(`^Drafted ${Math.min(5, waiting)} follow-up`));
+    expect(all<{ status: string }>(ctx.db, "SELECT status FROM actions WHERE title LIKE 'Follow-up to %'").every((a) => a.status === "proposed")).toBe(true);
+    expect(all(ctx.db, "SELECT 1 FROM actions WHERE title LIKE 'Follow-up to %'")).toHaveLength(Math.min(5, waiting));
+  });
+
+  it("routes the two-step requests even when the model picks only one step", async () => {
+    const { ctx } = await withGmail();
+    const cases: [string, Route, string][] = [
+      ["remind me to pay the electricity bill before it's due", { skill: "reminder", args: {} }, "reminder_from_email"],
+      ["add the deadlines from my emails to my reminders", { skill: "inbox_review", args: { days: 7 } }, "deadlines_to_reminders"],
+      ["what's the weather going to be on my trip?", { skill: "weather", args: {} }, "trip_weather"],
+      ["prep me for all my meetings tomorrow", { skill: "meeting_prep", args: { who: "meetings" } }, "prep_day"],
+      ["chase everyone who hasn't answered me", { skill: "nudge", args: { who: "everyone" } }, "nudge_all"],
+      ["when is the paris marathon? add it to my calendar", { skill: "web_search", args: { query: "paris marathon date" } }, "event_from_web"],
+      ["tell Laura yes for dinner and add it to my calendar", { skill: "draft_reply", args: { who: "Laura", message: "yes for dinner" } }, "reply_and_add"],
+    ];
+    for (const [text, route, want] of cases) {
+      const r = await runCommand(ctx, text, workflows, router({ [text]: route }));
+      expect(r.intent, text).toBe(want);
+    }
   });
 });

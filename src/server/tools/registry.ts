@@ -11,6 +11,7 @@ import { RunBudget } from "./budget";
 import { refreshFeeds } from "../news/feeds";
 import { fetchCalendarRange, readMessageText, readGmailById, searchGmail, syncCalendar, syncGmail } from "../connectors/google";
 import { forecast, forecastFor } from "../connectors/weather";
+import { readPage, searchWeb } from "../connectors/websearch";
 
 /**
  * The complete set of things an agent can do. Each tool declares the service it touches and the
@@ -239,6 +240,24 @@ export const TOOLS = {
     input: z.object({ place: z.string().trim().min(2).max(80).nullable() }),
     run: (ctx, input) => forecastFor(input.place, ctx),
     summarize: (o) => `7-day forecast for ${o.location}`,
+  }),
+  "web.search": tool({
+    name: "web.search",
+    description: "Search the web through the user's own SearXNG (no account). Returns titles, links and snippets as untrusted data.",
+    serviceId: "web-search",
+    required: "read",
+    input: z.object({ query: z.string().trim().min(2).max(200) }),
+    run: (_ctx, input) => searchWeb(input.query),
+    summarize: (o) => `${o.length} web results`,
+  }),
+  "web.read": tool({
+    name: "web.read",
+    description: "Read the text of one public https page (public addresses only, 1 MB cap). Untrusted data.",
+    serviceId: "web-search",
+    required: "read",
+    input: z.object({ url: z.string().url().max(500) }),
+    run: (_ctx, input) => readPage(input.url),
+    summarize: (o) => `${o.length} characters of page text`,
   }),
   "knowledge.search": tool({
     name: "knowledge.search",

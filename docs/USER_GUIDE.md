@@ -76,17 +76,26 @@ Press <kbd>Ctrl</kbd>+<kbd>K</kbd> and ask in your own words. The local model (M
 | “what's on tomorrow?” · “am I free friday afternoon?” · “what do I have next week?” | Your calendar for that day or period, with overlaps flagged |
 | “put dinner with Laura on saturday at 8pm in my calendar” · “block monday morning for deep work” | Prepares the event (see below) |
 | “add my flights to my calendar” | One event per upcoming flight found in your booking emails |
+| “check when I registered for the race in my emails and add it to my calendar” · “put the concert I bought tickets for in my calendar” | Searches your mail (also in French, Spanish and Catalan), reads the best matches, takes the event's date, time and place from them and prepares the event for your approval. It never guesses a date, and tells you if the event is already over or already in your calendar |
 | “remind me to call mom tomorrow at 6pm” | A reminder on Today, due at that time |
 | “reply to Ana that Thursday works” | The local model writes the reply in Ana's language; it waits for your approval as a Gmail draft |
 | “chase Priya about the quote” · “who hasn't answered me?” | A polite follow-up in the same thread, for approval · the list of quiet threads |
 | “what trips do I have coming up?” · “what am I paying for every month?” | Trips and bookings · subscriptions that look paid |
 | “what did I note about the kitchen?” | An answer from your notes, with the notes it used |
 | “weather in Barcelona tomorrow?” | Open-Meteo forecast, up to 7 days |
+| “remind me to pay the electricity bill before it's due” · “…a week before it expires” | Finds the bill or renewal in your mail, reads what to do and the deadline, and adds a reminder ahead of it (2 days by default, 09:00) |
+| “add the deadlines from my emails this week to my reminders” | The email review above, then one reminder per action (the day before each deadline) |
+| “what's the weather on my trip?” | Your next flight's destination and dates from your booking emails, and its forecast (up to 7 days ahead) |
+| “prep me for tomorrow's meetings” | A brief for each meeting of that day (three at most) |
+| “chase everyone who hasn't answered me” | One polite follow-up per waiting conversation (five at most), each waiting for your approval |
+| “when is the Paris marathon? add it to my calendar” | Finds the date on the web, then prepares the event for your approval |
+| “tell Laura yes for dinner and add it to my calendar” | A reply draft to Laura and the dinner from her email as an event, both for your approval |
+| “who won the final last night?” · “opening hours of the Picasso museum?” | Searches the web privately through your own SearXNG on this computer, reads the top three pages and answers with numbered sources (a few minutes). Off until you give the Knowledge agent Read on **Web search** in Connections & Permissions. Setup: [WEB_SEARCH.md](WEB_SEARCH.md) |
 | “brief me” · “weekly review” · “what's waiting for me?” · “what's scheduled?” · “remember I prefer short replies” | Runs or answers from the dashboard |
 
 Exact commands still work instantly, without the model: `add event: dentist tuesday 3pm`, `draft reply to Ana: sounds good!`, `propose times to Ana`, `remember …`, `trigger Todoist: buy milk`, and French `rdv : dîner chez Julien vendredi 20h`. Dates: `tomorrow`, `friday`, `next tuesday`, `24/10` (day/month), `24 october`, `in 3 days`; times: `3pm`, `15:00`, `15h`, `3-4pm`, `for 45 min`. Without a time, an event lasts all day.
 
-**What it won't do.** It never sends, approves, deletes, pays or changes permissions (those are yours, on the right page), and it never handles passwords. It can't search the web, book or buy yet: it says so instead of guessing. Emails it reads are untrusted: they're shown to the model as data, never stored, and an email that tries to instruct an AI isn't shown to the model at all (you're told to check it yourself).
+**What it won't do.** It never sends, approves, deletes, pays or changes permissions (those are yours, on the right page), and it never handles passwords. It can't book or buy: it says so instead of guessing. Emails it reads are untrusted: they're shown to the model as data, never stored, and an email that tries to instruct an AI isn't shown to the model at all (you're told to check it yourself).
 
 **Your requests** (Today) keeps every request with its status and answer: click one to read it. Long requests show their progress (“Reading email 4 of 18…”) and notify you when ready if notifications are on.
 

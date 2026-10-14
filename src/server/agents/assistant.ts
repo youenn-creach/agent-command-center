@@ -15,6 +15,7 @@ import { check } from "../policy/engine";
 import { addReminder } from "../reminders";
 import { InsightError, proposeNudge } from "../insights";
 import { eventOn, localToday, parseEventRequest, type PreparedEvent } from "./eventParse";
+import type { WebResult } from "../connectors/websearch";
 import { parseRange } from "./when";
 import { parseSender, writeReply } from "./chiefOfStaff";
 import { upcomingFlights } from "./flights";
@@ -37,6 +38,13 @@ export const SKILLS = {
   add_flights: "Add the flights or trips found in booking emails to the calendar.",
   event_from_email: "Find an event the user registered for, booked, bought tickets for or was invited to in their emails (a race, concert, appointment, course, reservation, match) and add it to the calendar. Args: query (Gmail search words for those emails).",
   reminder: "Remind the USER THEMSELVES to do something later (a to-do for the user), possibly at a time. Not a message to someone else.",
+  reminder_from_email: "Find a bill, renewal or deadline in the user's emails and set a reminder before it's due. Args: query (Gmail search words for that email).",
+  deadlines_to_reminders: "Go through recent emails and turn every deadline or action needed into reminders. Args: days.",
+  trip_weather: "The weather forecast for the user's next trip (destination and dates from their booking emails).",
+  prep_day: "Prepare the user for ALL the meetings of a day (one brief each): 'prep me for tomorrow's meetings'.",
+  nudge_all: "Follow up with EVERYONE who hasn't answered the user (one polite follow-up draft each).",
+  event_from_web: "Look up a public event on the web (a marathon, a festival, a match, a concert date) and add it to the calendar. Args: query.",
+  reply_and_add: "Reply to someone's email (accepting an invitation, confirming) AND add that event to the calendar. Args: who, message.",
   draft_reply: "Write an email reply to someone for the user to approve. Args: who (the person), message (what the user wants to say).",
   nudge: "Follow up with, chase, or send a reminder TO SOMEONE ELSE who has not answered the user's email. Args: who.",
   waiting_on: "List the people who have not replied to the user's emails (threads where the user is waiting).",
@@ -96,6 +104,13 @@ const PROMPT_SKILLS: Record<Skill, string> = {
   add_flights: "add the flights from booking emails to the calendar",
   event_from_email: "find an event in the user's emails (race, concert, appointment, reservation) and add it to the calendar {query}",
   reminder: "a to-do for the user: remind me, don't let me forget, add a task",
+  reminder_from_email: "find a bill / renewal / deadline in the user's emails and remind them before it's due {query}",
+  deadlines_to_reminders: "turn the deadlines and actions in recent emails into reminders {days}",
+  trip_weather: "weather for the user's next trip (from their bookings)",
+  prep_day: "briefs for ALL the meetings of a day",
+  nudge_all: "follow up with EVERYONE who hasn't answered",
+  event_from_web: "look up a public event's date on the web and add it to the calendar {query}",
+  reply_and_add: "reply to someone (accept, confirm) AND add the event to the calendar {who, message}",
   draft_reply: "write a reply to someone {who, message}",
   nudge: "chase / follow up with / remind SOMEONE ELSE who hasn't answered {who}",
   waiting_on: "who hasn't answered the user",
@@ -128,6 +143,13 @@ const EXAMPLES: [string, string][] = [
   ["block monday morning for deep work", "add_event {}"],
   ["check my emails for when I registered for the marathon and add it to my calendar", 'event_from_email {"query":"marathon registration"}'],
   ["put the concert I bought tickets for in my calendar", 'event_from_email {"query":"concert tickets"}'],
+  ["remind me to pay the electricity bill before it's due", 'reminder_from_email {"query":"electricity bill"}'],
+  ["add the deadlines from my emails this week to my reminders", 'deadlines_to_reminders {"days":7}'],
+  ["what will the weather be like on my trip?", "trip_weather {}"],
+  ["prep me for tomorrow's meetings", "prep_day {}"],
+  ["chase everyone who hasn't replied to me", "nudge_all {}"],
+  ["when is the Paris marathon next year? add it to my calendar", 'event_from_web {"query":"Paris marathon 2027 date"}'],
+  ["tell Laura yes for dinner and put it in my calendar", 'reply_and_add {"who":"Laura","message":"yes for dinner"}'],
   ["remind me to renew my passport next month", "reminder {}"],
   ["don't let me forget to call the bank", "reminder {}"],
   ["how busy am I tomorrow?", "agenda {}"],
@@ -141,7 +163,8 @@ const EXAMPLES: [string, string][] = [
   ["what am I paying for every month?", "subscriptions {}"],
   ["how often do I water the plants?", 'notes_search {"query":"water the plants"}'],
   ["will it rain in Barcelona tomorrow?", 'weather {"query":"Barcelona"}'],
-  ["who won the match last night?", 'web_search {"query":"match result"}'],
+  ["who won the match last night?", 'web_search {"query":"who won the match last night"}'],
+  ["what are the opening hours of the Picasso museum?", 'web_search {"query":"Picasso museum opening hours"}'],
   ["order a pizza", 'unsupported {"reason":"ordering food"}'],
 ];
 
@@ -215,7 +238,7 @@ export function warmRouter(ctx: Ctx, busy: boolean, llm: LlmProvider = localLlm(
 
 export interface SkillAnswer {
   reply: string;
-  /** `href`: a Google Calendar pre-filled page (the only link an answer may carry). */
+  /** `href`: an https link (Google Calendar's pre-filled page, a web source), opened in a new tab. */
   items?: { title: string; detail?: string; href?: string }[];
   section?: "today" | "actions" | "schedules" | "tech" | "permissions" | "knowledge" | "insights";
   actionId?: string;
@@ -337,7 +360,7 @@ export function reminderFromText(ctx: Ctx, text: string): SkillAnswer {
 
 const BOOKINGS_FRESH_MS = 6 * 3_600_000;
 
-async function refreshScan(ctx: Ctx, agent: "inbox" | "follow_up", tool: "gmail.scan_bookings" | "gmail.scan_waiting", setting: string): Promise<string | null> {
+export async function refreshScan(ctx: Ctx, agent: "inbox" | "follow_up", tool: "gmail.scan_bookings" | "gmail.scan_waiting", setting: string): Promise<string | null> {
   if (!isConnected(ctx, "gmail")) return null;
   const last = getSetting(ctx.db, setting);
   if (last && ctx.now().getTime() - Date.parse(last) < BOOKINGS_FRESH_MS) return null;
@@ -493,8 +516,31 @@ const ANSWER_SYSTEM = [
   UNTRUSTED_DATA_RULES,
 ].join("\n");
 
+const WEB_SYSTEM = [
+  "You answer the user's question using ONLY the web search results and pages given below.",
+  "Give the answer first, with the key facts (names, dates, numbers), and cite sources like [1]. Prefer the most recent and most official sources; say when sources disagree.",
+  "If the sources don't answer the question, say so plainly in one sentence. Do not guess. Answer in English, in at most four sentences of plain text (no Markdown, no notes).",
+  UNTRUSTED_DATA_RULES,
+].join("\n");
+
+/**
+ * "Who won the final?", "opening hours of the Picasso museum": the user's own SearXNG finds pages, the top
+ * three are read (public https pages only), and the local model answers with numbered sources.
+ */
+export async function webAnswer(ctx: Ctx, question: string, query: string, progress: (s: string) => void, llm: LlmProvider = localLlm(ctx, "background")): Promise<SkillAnswer> {
+  const found = await webSources(ctx, query, progress);
+  if (!("results" in found)) return found;
+  progress("Writing the answer…");
+  const today = ctx.now().toISOString().slice(0, 10);
+  const sources = found.results.map((r) => fenceUntrusted(`web result [${r.n}] ${new URL(r.url).hostname}`, `Title: ${r.title}\nSnippet: ${r.snippet}${found.pages.has(r.n) ? `\nPage text: ${found.pages.get(r.n)}` : ""}`)).join("\n\n");
+  const out = await llm.generate(WEB_SYSTEM, `Today is ${today}.\nQuestion: ${question}\n\n${sources}`, { maxTokens: 260, timeoutMs: 1_200_000 });
+  // Plain text: the answer is shown as is, so Markdown emphasis would appear as asterisks.
+  const plain = out.text.replace(/\*\*|__/g, "").replace(/^\s*\*\(?(Note|Disclaimer)[\s\S]*$/im, "").trim();
+  return { reply: plain, items: webItems(found.results) };
+}
+
 /** Reads the top matches of a Gmail search (skipping AI-directed text) for the local model. */
-async function readMatches(ctx: Ctx, query: string, max: number, progress: (s: string) => void) {
+export async function readMatches(ctx: Ctx, query: string, max: number, progress: (s: string) => void) {
   const rows = await callTool(ctx, "inbox", "gmail.search", { query, max: 8 }, new RunBudget(1, 60_000));
   const read: { n: number; sender: string; subject: string; date: string; text: string }[] = [];
   for (const r of rows.filter((x) => !x.bulk || /booking|reserv|ticket|invoice|factura|order|confirm/i.test(x.subject)).slice(0, max)) {
@@ -544,23 +590,23 @@ function searchWords(text: string) {
 }
 
 const EVENT_SYSTEM = [
-  "The user wants an event from their emails in their calendar. From the emails below, find the event they ask about (one they registered for, booked, bought tickets for or were invited to) and give:",
-  "found: true only if an email states the DATE the event takes place (not the date the email was sent or the registration was made).",
-  "email: the number of the email that gives the date.",
+  "The user wants an event in their calendar. From the sources below (their emails, or web pages), find the event they ask about (one they registered for, booked, bought tickets for or were invited to, or the public event they name) and give:",
+  "found: true only if a source states the DATE the event takes place (not the date an email was sent or a registration was made).",
+  "source: the number of the source that gives the date.",
   "title: a short calendar title in English with the event's own name (e.g. 'Barcelona Marathon', 'Coldplay concert', 'Dentist').",
-  "date: the day of the event as YYYY-MM-DD. start and end: HH:MM in 24-hour time if the email gives them, else empty. location: the place if given, else empty.",
-  "Use only what the emails say; never guess a date or a time. The emails may be in any language.",
+  "date: the day of the event as YYYY-MM-DD. start and end: HH:MM in 24-hour time if the source gives them, else empty. location: the place if given, else empty.",
+  "Use only what the sources say; never guess a date or a time. The sources may be in any language.",
   UNTRUSTED_DATA_RULES,
   "Answer with JSON only.",
 ].join("\n");
 const EVENT_SCHEMA = {
   type: "object",
-  properties: { found: { type: "boolean" }, email: { type: "integer" }, title: { type: "string" }, date: { type: "string" }, start: { type: "string" }, end: { type: "string" }, location: { type: "string" } },
-  required: ["found", "email", "title", "date", "start", "end", "location"],
+  properties: { found: { type: "boolean" }, source: { type: "integer" }, title: { type: "string" }, date: { type: "string" }, start: { type: "string" }, end: { type: "string" }, location: { type: "string" } },
+  required: ["found", "source", "title", "date", "start", "end", "location"],
 };
 const FoundEvent = z.object({
   found: z.boolean(),
-  email: z.number().int().catch(1),
+  source: z.number().int().catch(1),
   title: z.string().default(""),
   date: z.string().default(""),
   start: z.string().default(""),
@@ -570,10 +616,73 @@ const FoundEvent = z.object({
 
 export type EventFromEmail = { prepared: PreparedEvent; source: string } | SkillAnswer;
 
+/** One email or web page given to the model: its fence label, its text, and how the answer cites it. */
+interface SourceDoc {
+  n: number;
+  label: string;
+  body: string;
+  cite: string;
+  /** Fallback title when the model gives none. */
+  title: string;
+}
+
+const ymdOf = (d: { y: number; m: number; d: number }) => `${d.y}-${String(d.m).padStart(2, "0")}-${String(d.d).padStart(2, "0")}`;
+
+/** "YYYY-MM-DD" as a real calendar day, or null. */
+export function realDay(s: string): { y: number; m: number; d: number } | null {
+  const m = s.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const date = { y: +m[1], m: +m[2], d: +m[3] };
+  const t = new Date(Date.UTC(date.y, date.m - 1, date.d));
+  return t.getUTCMonth() === date.m - 1 && t.getUTCDate() === date.d ? date : null;
+}
+
+/**
+ * The local model pulls the event's date, time and place out of the sources; code checks the date
+ * (a real day, not already over) and that the calendar doesn't already have it.
+ */
+async function extractEvent(ctx: Ctx, text: string, docs: SourceDoc[], items: SkillAnswer["items"], llm: LlmProvider, progress: (s: string) => void): Promise<EventFromEmail> {
+  progress("Finding the date in those sources…");
+  const tzName = tz();
+  const today = localToday(ctx.now(), tzName);
+  const out = await llm.generate(
+    EVENT_SYSTEM,
+    `Today is ${ymdOf(today)}.\nRequest: ${text}\n\n${docs.map((d) => fenceUntrusted(d.label, d.body)).join("\n\n")}`,
+    { maxTokens: 200, timeoutMs: 1_200_000, format: EVENT_SCHEMA, temperature: 0 },
+  );
+  let f: z.infer<typeof FoundEvent>;
+  try {
+    f = FoundEvent.parse(JSON.parse(out.text));
+  } catch {
+    return { reply: "I read the matching sources but couldn't make out the event's date. They're listed below.", items };
+  }
+  const date = realDay(f.date);
+  if (!f.found || !date) return { reply: "I found sources that seem related, but none of them gives the date of the event, so I didn't add anything. They're listed below.", items };
+  const src = docs.find((d) => d.n === f.source) ?? docs[0];
+  const title = f.title.replace(/\s+/g, " ").trim().slice(0, 120) || src.title.slice(0, 120);
+  const location = f.location.replace(/\s+/g, " ").trim().slice(0, 200) || null;
+  const prepared = eventOn(title, location, date, f.start.trim(), f.end.trim(), tzName, ctx.now());
+  const when = `${new Date(prepared.startsAt).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: tzName })}${prepared.allDay ? " (all day: no time given)" : `, ${hm(prepared.startsAt)}–${hm(prepared.endsAt)}`}`;
+  if (ymdOf(date) < ymdOf(today)) return { reply: `The event I found, “${title}” on ${when}, is already over, so I didn't add it. Source: ${src.cite}.`, items };
+  const day = eventOn("x", null, date, "", "", tzName, ctx.now());
+  const sameDay = all<{ title: string }>(ctx.db, `SELECT title FROM events WHERE starts_at < ? AND ends_at > ?${demoRowsFilter()}`, day.endsAt, day.startsAt);
+  // The synced copy covers two weeks; further out (an invitation already accepted), ask Google for that day.
+  if (isConnected(ctx, "google-calendar")) {
+    try {
+      sameDay.push(...(await callTool(ctx, "calendar", "gcal.range", { from: day.startsAt, to: day.endsAt }, new RunBudget(1, 30_000))));
+    } catch {
+      // Unreadable now: the approval step still shows the event before anything is added.
+    }
+  }
+  const words = title.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 3);
+  const twin = sameDay.find((e) => words.some((w) => e.title.toLowerCase().includes(w)));
+  if (twin) return { reply: `“${title}” on ${when} is already in your calendar (“${twin.title}”). Source: ${src.cite}.`, items };
+  return { prepared, source: `${title}, ${when}${location ? `, ${location}` : ""}. Found in ${src.cite}.` };
+}
+
 /**
  * "Check when I registered for the race and add it to my calendar": search the mail, read the best
- * matches, and have the local model pull out the event's date, time and place. Code checks the date
- * (a real day, not already over, not already in the calendar); the caller proposes the event.
+ * matches, and pull out the event (the caller proposes it).
  */
 export async function findEventInEmail(ctx: Ctx, text: string, query: string, progress: (s: string) => void, llm: LlmProvider = localLlm(ctx, "background")): Promise<EventFromEmail> {
   if (!isConnected(ctx, "gmail")) return { reply: "Gmail isn't connected, so I can't look in your mail. Connect it in Connections & Permissions.", section: "permissions" };
@@ -587,47 +696,56 @@ export async function findEventInEmail(ctx: Ctx, text: string, query: string, pr
     throw err;
   }
   if (!read.length) return { reply: `I found no email matching “${query || searchWords(text)}”. Try naming the event or who it's from (e.g. “add the marathon from RunReg to my calendar”).` };
-  const sources = read.map((r) => ({ title: `[${r.n}] ${r.subject}`, detail: `${parseSender(r.sender).name ?? r.sender} · ${dayLabel(r.date)}` }));
-  progress("Finding the date in those emails…");
-  const tzName = tz();
-  const today = localToday(ctx.now(), tzName);
-  const ymd = (d: { y: number; m: number; d: number }) => `${d.y}-${String(d.m).padStart(2, "0")}-${String(d.d).padStart(2, "0")}`;
-  const out = await llm.generate(
-    EVENT_SYSTEM,
-    `Today is ${ymd(today)}.\nRequest: ${text}\n\n${read.map((r) => fenceUntrusted(`email [${r.n}] from ${r.sender}`, `Subject: ${r.subject}\nDate sent: ${r.date.slice(0, 10)}\n\n${r.text}`)).join("\n\n")}`,
-    { maxTokens: 200, timeoutMs: 1_200_000, format: EVENT_SCHEMA, temperature: 0 },
-  );
-  let f: z.infer<typeof FoundEvent>;
+  const docs = read.map((r) => ({
+    n: r.n,
+    label: `email [${r.n}] from ${r.sender}`,
+    body: `Subject: ${r.subject}\nDate sent: ${r.date.slice(0, 10)}\n\n${r.text}`,
+    cite: `“${r.subject}” (${parseSender(r.sender).name ?? r.sender}, ${dayLabel(r.date)})`,
+    title: r.subject,
+  }));
+  const items = read.map((r) => ({ title: `[${r.n}] ${r.subject}`, detail: `${parseSender(r.sender).name ?? r.sender} · ${dayLabel(r.date)}` }));
+  return extractEvent(ctx, text, docs, items, llm, progress);
+}
+
+/** Web results and the text of the top pages (public https only), for the local model. */
+async function webSources(ctx: Ctx, query: string, progress: (s: string) => void): Promise<{ results: WebResult[]; pages: Map<number, string> } | SkillAnswer> {
+  if (!check(ctx, "knowledge", "web-search", "read")) return { reply: "Web search is off. To allow it, give the Knowledge agent Read on “Web search” in Connections & Permissions.", section: "permissions" };
+  progress("Searching the web (privately, through your own SearXNG)…");
+  let results: WebResult[];
   try {
-    f = FoundEvent.parse(JSON.parse(out.text));
-  } catch {
-    return { reply: "I read the matching emails but couldn't make out the event's date. Open them below to check.", items: sources };
+    results = await callTool(ctx, "knowledge", "web.search", { query: query.slice(0, 200) }, new RunBudget(1, 60_000));
+  } catch (err) {
+    if (denied(err)) return { reply: "The Knowledge agent needs Read on Web search for that. Grant it in Connections & Permissions.", section: "permissions" };
+    return { reply: err instanceof Error ? err.message : "The web search failed." };
   }
-  const m = f.date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  const date = m ? { y: +m[1], m: +m[2], d: +m[3] } : null;
-  const real = date && new Date(Date.UTC(date.y, date.m - 1, date.d)).getUTCDate() === date.d && date.m >= 1 && date.m <= 12;
-  if (!f.found || !date || !real) return { reply: "I found emails that seem related, but none of them gives the date of the event, so I didn't add anything. They're listed below.", items: sources };
-  const src = read.find((r) => r.n === f.email) ?? read[0];
-  const title = f.title.replace(/\s+/g, " ").trim().slice(0, 120) || src.subject.slice(0, 120);
-  const location = f.location.replace(/\s+/g, " ").trim().slice(0, 200) || null;
-  const prepared = eventOn(title, location, date, f.start.trim(), f.end.trim(), tzName, ctx.now());
-  const source = `“${src.subject}” (${parseSender(src.sender).name ?? src.sender}, ${dayLabel(src.date)})`;
-  const when = `${new Date(prepared.startsAt).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: tzName })}${prepared.allDay ? " (all day: no time in the email)" : `, ${hm(prepared.startsAt)}–${hm(prepared.endsAt)}`}`;
-  if (ymd(date) < ymd(today)) return { reply: `The event I found, “${title}” on ${when}, is already over, so I didn't add it. Source: ${source}.`, items: sources };
-  const day = eventOn("x", null, date, "", "", tzName, ctx.now());
-  const sameDay = all<{ title: string }>(ctx.db, `SELECT title FROM events WHERE starts_at < ? AND ends_at > ?${demoRowsFilter()}`, day.endsAt, day.startsAt);
-  // The synced copy covers two weeks; further out (an invitation already accepted), ask Google for that day.
-  if (isConnected(ctx, "google-calendar")) {
+  if (!results.length) return { reply: `The web search for “${query}” found nothing.` };
+  const pages = new Map<number, string>();
+  for (const r of results.slice(0, 3)) {
+    progress(`Reading ${new URL(r.url).hostname}…`);
     try {
-      sameDay.push(...(await callTool(ctx, "calendar", "gcal.range", { from: day.startsAt, to: day.endsAt }, new RunBudget(1, 30_000))));
+      const text = await callTool(ctx, "knowledge", "web.read", { url: r.url }, new RunBudget(1, 30_000));
+      if (!isAiDirected(injectionFlags(text))) pages.set(r.n, text.slice(0, 2500));
     } catch {
-      // Unreadable now: the approval step still shows the event before anything is added.
+      // Unreadable page (blocked, not https, too slow): its snippet still counts.
     }
   }
-  const words = title.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 3);
-  const twin = sameDay.find((e) => words.some((w) => e.title.toLowerCase().includes(w)));
-  if (twin) return { reply: `“${title}” on ${when} is already in your calendar (“${twin.title}”). Source: ${source}.`, items: sources };
-  return { prepared, source: `${title}, ${when}${location ? `, ${location}` : ""}. Found in ${source}.` };
+  return { results, pages };
+}
+
+const webItems = (results: WebResult[]) => results.slice(0, 5).map((r) => ({ title: `[${r.n}] ${r.title}`, detail: new URL(r.url).hostname, href: r.url }));
+
+/** "When is the Barcelona marathon 2027? Add it to my calendar": the event from public web pages. */
+export async function findEventOnWeb(ctx: Ctx, text: string, query: string, progress: (s: string) => void, llm: LlmProvider = localLlm(ctx, "background")): Promise<EventFromEmail> {
+  const found = await webSources(ctx, query, progress);
+  if (!("results" in found)) return found;
+  const docs = found.results.map((r) => ({
+    n: r.n,
+    label: `web result [${r.n}] ${new URL(r.url).hostname}`,
+    body: `Title: ${r.title}\nSnippet: ${r.snippet}${found.pages.has(r.n) ? `\nPage text: ${found.pages.get(r.n)}` : ""}`,
+    cite: `${r.title} (${new URL(r.url).hostname})`,
+    title: r.title,
+  }));
+  return extractEvent(ctx, text, docs, webItems(found.results), llm, progress);
 }
 
 /** "When is my hotel check-in in Lisbon?": find the emails, read them, answer with sources. */
@@ -696,7 +814,7 @@ export async function meetingPrep(ctx: Ctx, text: string, who: string, progress:
 
 /** What the assistant can do, for an honest "not yet" answer. */
 export const CAN_DO =
-  "I can: review your recent email (or spam) for things that need you, search your mail or answer questions from it, prepare you for a meeting, answer about your calendar, add events or your flights, set reminders, draft replies and nudges for your approval, list who owes you an answer, your trips and subscriptions, give the weather, answer from your notes, run the briefing or weekly review.";
+  "I can: review your recent email (or spam) for things that need you, search your mail or answer questions from it, answer about your calendar, add events, flights or an event found in your email or on the web to your calendar, set reminders (also from a bill or deadline in your mail), draft replies and nudges for your approval (one or everyone), list who owes you an answer, your trips and subscriptions, give the weather (also for your next trip), search the web privately, answer from your notes, prepare a meeting or a whole day, run the briefing or weekly review.";
 
 // ---------- skills that run in the background (the local model writes or reads) ----------
 

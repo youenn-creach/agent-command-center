@@ -21,7 +21,8 @@ import { getAction } from "../approvals";
 import { APP_CALENDAR_NAME } from "../connectors/google";
 import { calendarMode } from "../calendarMode";
 import { alreadyInCalendar, flightEvent, flightKey, upcomingFlights } from "./flights";
-import { agenda, CAN_DO, draftReplyFree, emailQuestion, findEventInEmail, emailSearch, meetingPrep, notesAnswer, nudge, quickRoute, reminderFromText, routeRequest, subscriptions, trips, waitingOn, weatherAnswer, type Route, type SkillAnswer } from "./assistant";
+import { deadlinesToReminders, nudgeAll, prepDay, reminderFromEmail, tripWeather } from "./chains";
+import { agenda, CAN_DO, draftReplyFree, emailQuestion, findEventInEmail, findEventOnWeb, webAnswer, emailSearch, meetingPrep, notesAnswer, nudge, quickRoute, reminderFromText, routeRequest, subscriptions, trips, waitingOn, weatherAnswer, type Route, type SkillAnswer } from "./assistant";
 import { reviewInbox } from "./inboxReview";
 import type { LlmProvider } from "../llm";
 import { finishRequest, setRequestProgress } from "../requests";
@@ -38,7 +39,7 @@ import { getSetting, one } from "../db";
 export const CommandSchema = z.object({ text: z.string().trim().min(1).max(300) });
 
 export type Intent =
-  | "inbox_review" | "email_search" | "email_question" | "event_from_email" | "meeting_prep" | "weather" | "agenda" | "reminder" | "nudge" | "waiting_on" | "trips" | "subscriptions" | "notes" | "web_search" | "unsupported"
+  | "inbox_review" | "email_search" | "email_question" | "event_from_email" | "reminder_from_email" | "deadlines_to_reminders" | "trip_weather" | "prep_day" | "nudge_all" | "event_from_web" | "reply_and_add" | "meeting_prep" | "weather" | "agenda" | "reminder" | "nudge" | "waiting_on" | "trips" | "subscriptions" | "notes" | "web_search" | "unsupported"
   | "slots" | "remember" | "event" | "flights" | "briefing" | "weekly" | "followups" | "search" | "schedule" | "pending" | "today" | "automation" | "draft" | "refused" | "help";
 
 export interface CommandResult {
@@ -293,8 +294,8 @@ async function proposeEvent(ctx: Ctx, prepared: PreparedEvent): Promise<{ approv
 }
 
 /** "Find the race in my email and add it to my calendar": the event from the mail, proposed like any other. */
-export async function eventFromEmail(ctx: Ctx, text: string, query: string, progress: (s: string) => void, llm?: LlmProvider): Promise<SkillAnswer> {
-  const found = await findEventInEmail(ctx, text, query, progress, llm);
+export async function eventFromEmail(ctx: Ctx, text: string, query: string, progress: (s: string) => void, llm?: LlmProvider, finder: typeof findEventInEmail = findEventInEmail): Promise<SkillAnswer> {
+  const found = await finder(ctx, text, query, progress, llm);
   if (!("prepared" in found)) return found;
   const { prepared, source } = found;
   logActivity(ctx, { actor: "calendar", kind: "agent_run", agentId: "calendar", outcome: "info", summary: `Prepared a calendar event from an email: ${prepared.title.slice(0, 80)}` });
@@ -367,8 +368,23 @@ const TO_CALENDAR = /\b(add|put|save|create)\b.*\b(calendar|agenda)\b/i;
 const FLIGHT_WORD = /\b(flights?|planes?|plane tickets)\b/i;
 
 async function runSkill(ctx: Ctx, text: string, route: Route, workflows: WorkflowRegistry): Promise<CommandResult> {
-  if (MAIL_WORD.test(text) && TO_CALENDAR.test(text) && !FLIGHT_WORD.test(text) && ["add_event", "email_question", "email_search", "add_flights", "trips"].includes(route.skill)) {
+  const s = route.skill;
+  if (TO_CALENDAR.test(text) && /\b(reply|answer|tell|write back|accept|confirm)\b/i.test(text) && (s === "draft_reply" || s === "add_event") && route.args.who) {
+    route = { skill: "reply_and_add", args: route.args };
+  } else if (MAIL_WORD.test(text) && TO_CALENDAR.test(text) && !FLIGHT_WORD.test(text) && ["add_event", "email_question", "email_search", "add_flights", "trips"].includes(s)) {
     route = { skill: "event_from_email", args: { query: route.args.query } };
+  } else if (!MAIL_WORD.test(text) && TO_CALENDAR.test(text) && s === "web_search") {
+    route = { skill: "event_from_web", args: route.args };
+  } else if (s === "reminder" && /\b(before (?:it'?s|they'?re) due|before the (?:deadline|due date)|(?:in|from) my (?:e-?mails?|mail|inbox))\b/i.test(text)) {
+    route = { skill: "reminder_from_email", args: { query: route.args.query } };
+  } else if (s === "inbox_review" && /\b(reminders?|to-?dos?)\b/i.test(text)) {
+    route = { skill: "deadlines_to_reminders", args: route.args };
+  } else if (s === "weather" && /\b(trip|travel|holidays?|vacation|flight)\b/i.test(text) && !route.args.query) {
+    route = { skill: "trip_weather", args: {} };
+  } else if (s === "meeting_prep" && /\b(meetings|all my|calls)\b/i.test(text)) {
+    route = { skill: "prep_day", args: {} };
+  } else if (s === "nudge" && /\b(everyone|everybody|all of them|them all|all the people)\b/i.test(text)) {
+    route = { skill: "nudge_all", args: {} };
   }
   const a = route.args;
   const answer = (intent: Intent, r: SkillAnswer): CommandResult => ({ intent, reply: r.reply, items: r.items, section: r.section, ref: r.actionId ? { actionId: r.actionId } : undefined });
@@ -398,6 +414,37 @@ async function runSkill(ctx: Ctx, text: string, route: Route, workflows: Workflo
       return runIntent(ctx, text, { intent: "event", query: eventText(text) }, workflows);
     case "add_flights":
       return runIntent(ctx, text, { intent: "flights" }, workflows);
+    case "reminder_from_email": {
+      const query = a.query?.trim() || text;
+      if (!isConnected(ctx, "gmail")) return { intent: "reminder_from_email", reply: "Gmail isn't connected, so I can't look in your mail. Connect it in Connections & Permissions.", section: "permissions" };
+      return later("reminder_from_email", "Looking for it in your emails with the local model; the reminder will be set ahead of the deadline. The answer will appear under “Your requests” on Today.", (p) => reminderFromEmail(ctx, text, query, p));
+    }
+    case "deadlines_to_reminders": {
+      const days = Math.min(Math.max(a.days ?? (/\bmonth\b/i.test(text) ? 30 : 7), 1), 30);
+      if (!isConnected(ctx, "gmail")) return { intent: "deadlines_to_reminders", reply: "Gmail isn't connected, so I can't read your email. Connect it in Connections & Permissions.", section: "permissions" };
+      return later("deadlines_to_reminders", `Reading your email from the last ${days} days with the local model, then adding a reminder for each deadline or action. This takes a while; the answer will appear under “Your requests” on Today.`, (p) => deadlinesToReminders(ctx, days, p));
+    }
+    case "trip_weather":
+      return answer("trip_weather", await tripWeather(ctx));
+    case "prep_day":
+      return later("prep_day", "Preparing a brief for each meeting from your calendar, recent emails and notes. The answer will appear under “Your requests” on Today.", (p) => prepDay(ctx, text, p));
+    case "nudge_all":
+      return answer("nudge_all", await nudgeAll(ctx));
+    case "event_from_web": {
+      const query = a.query?.trim() || text;
+      return later("event_from_web", "Looking up the event on the web (privately, your own SearXNG) with the local model. Once I find its date, it will be ready to add to your calendar (you approve it). The answer will appear under “Your requests” on Today.", (p) => eventFromEmail(ctx, text, query, p, undefined, findEventOnWeb));
+    }
+    case "reply_and_add": {
+      const who = a.who?.trim();
+      if (!who) return { intent: "reply_and_add", reply: "Who should I reply to? e.g. “tell Laura yes for dinner and add it to my calendar”." };
+      if (!isConnected(ctx, "gmail")) return { intent: "reply_and_add", reply: "Gmail isn't connected, so I can't find the email to reply to. Connect it in Connections & Permissions.", section: "permissions" };
+      const message = a.message?.trim() || text;
+      return later("reply_and_add", `Writing the reply to ${who} and finding the event in their email. Both will wait for your approval; the answer will appear under “Your requests” on Today.`, async (p) => {
+        const reply = await draftReplyFree(ctx, who, message, p);
+        const event = await eventFromEmail(ctx, text, `from:"${who.replace(/"/g, "")}" newer_than:90d`, p);
+        return { reply: `${reply.reply}\n\n${event.reply}`, items: [...(reply.items ?? []), ...(event.items ?? [])], actionId: reply.actionId ?? event.actionId, section: reply.actionId || event.actionId ? "actions" : undefined };
+      });
+    }
     case "event_from_email": {
       const query = a.query?.trim() ?? "";
       if (!isConnected(ctx, "gmail")) return { intent: "event_from_email", reply: "Gmail isn't connected, so I can't look in your mail. Connect it in Connections & Permissions.", section: "permissions" };
@@ -453,12 +500,11 @@ async function runSkill(ctx: Ctx, text: string, route: Route, workflows: Workflo
     case "propose_times":
       if (!a.who) return { intent: "help", reply: "Who should I offer times to? Say for example “propose times to Ana for 30 minutes”." };
       return runIntent(ctx, text, { intent: "slots", target: a.who, query: a.minutes ? String(a.minutes) : undefined }, workflows);
-    case "web_search":
-      return {
-        intent: "web_search",
-        unsupported: true,
-        reply: `I can't search the internet yet${a.query ? ` (for “${a.query}”)` : ""}: everything I do stays on this machine or in your own accounts. Web search is planned. ${CAN_DO}`,
-      };
+    case "web_search": {
+      // Search engines read questions well: the user's own words, without "search the web for".
+      const query = text.replace(/^\s*(?:please\s+)?(?:(?:can|could) you\s+)?(?:search|look up|google|check)(?: (?:the web|the internet|online))?(?: for)?\s+/i, "").trim() || a.query?.trim() || text;
+      return later("web_search", "Searching the web privately (your own SearXNG) and reading the top pages with the local model. The answer will appear under “Your requests” on Today.", (p) => webAnswer(ctx, text, query, p));
+    }
     default:
       return { intent: "unsupported", unsupported: true, reply: `I can't do that yet${a.reason ? ` (${a.reason})` : ""}. ${CAN_DO}` };
   }

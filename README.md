@@ -121,6 +121,7 @@ Everything works at $0 with no credentials. After editing `.env.local`, restart 
 | Local semantic search | `npm run setup:local-embeddings` (one-time ~420 MB download of voyage-4-nano) |
 | Atlas + Voyage | Copy `.env.example` → `.env.local`, set `ATLAS_*` / `VOYAGE_*`, run `npm run atlas:setup` (again after updates that add a search filter), then confirm live mode in **Under the hood** |
 | Gmail / Google Calendar | [docs/GOOGLE_SETUP.md](docs/GOOGLE_SETUP.md) (about 10 minutes, read-only; optional Gmail drafts) |
+| Private web search for Ctrl+K | [docs/WEB_SEARCH.md](docs/WEB_SEARCH.md) (your own SearXNG on this computer, no account, about 200 MB) |
 | News | **Settings → News sources**: enable a suggested feed or add your own https feed |
 | Weather | **Settings → Weather**: pick your city (Open-Meteo, no account), then grant Read |
 | Automations | **Settings → Automations**: add a catch-hook URL (Zapier, Make, n8n…), grant it, then “trigger Todoist: buy milk”. Every call waits for your approval |

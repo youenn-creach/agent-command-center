@@ -23,7 +23,7 @@ interface ServiceRow {
 }
 
 /** Services that can never be written to, whatever the database says. */
-export const READ_ONLY_SERVICES = new Set(["gmail", "google-calendar", "weather", "demo-notes", "public-news"]);
+export const READ_ONLY_SERVICES = new Set(["gmail", "google-calendar", "weather", "demo-notes", "public-news", "web-search"]);
 
 export interface EffectiveAccess {
   level: AccessLevel;

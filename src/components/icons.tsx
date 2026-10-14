@@ -89,6 +89,13 @@ export function ServiceIcon({ id, size = 18, className }: { id: string; size?: n
           <circle cx="6" cy="18" r="1.5" fill="currentColor" />
         </svg>
       );
+    case "web-search":
+      return (
+        <svg {...common} fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
+          <circle cx="11" cy="11" r="6.5" />
+          <path d="M4.5 11h13M11 4.5c2 2 2 11 0 13M11 4.5c-2 2-2 11 0 13M16 16l4.5 4.5" />
+        </svg>
+      );
     case "local-tasks":
       return (
         <svg {...common} fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">

@@ -96,6 +96,13 @@ const SECTION: Record<string, string> = {
   notes: "knowledge",
   event: "today",
   event_from_email: "today",
+  reminder_from_email: "today",
+  deadlines_to_reminders: "today",
+  trip_weather: "today",
+  prep_day: "today",
+  nudge_all: "actions",
+  event_from_web: "today",
+  reply_and_add: "actions",
   flights: "today", remember: "knowledge", search: "tech", schedule: "schedules", pending: "actions", today: "today" };
 
 export function listRequests(ctx: Ctx, limit = 15): RequestView[] {

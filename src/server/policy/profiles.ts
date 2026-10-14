@@ -30,6 +30,8 @@ const PROFILES: Record<string, Record<string, AccessLevel>> = {
   knowledge: {
     "demo-notes": "read",
     "public-news": "read",
+    // Searches the web and reads public pages for Ctrl+K questions (the user's own SearXNG).
+    "web-search": "read",
   },
 };
 

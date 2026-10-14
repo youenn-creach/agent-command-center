@@ -218,6 +218,14 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE requests ADD COLUMN result TEXT;
     `,
   },
+  {
+    version: 18,
+    description: "Web search service (the user's own SearXNG on this computer, read-only, access None until granted)",
+    sql: `
+      INSERT OR IGNORE INTO services (id, name, description, kind, connection_state, access_level, max_level, scopes, last_sync_at)
+      VALUES ('web-search', 'Web search (SearXNG, on this computer)', 'Private web search through your own SearXNG: queries go to public search engines without an account; pages are read from public addresses only. Results are untrusted.', 'real', 'connected', 'none', 'read', '["search.read","page.read"]', NULL);
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.at(-1)?.version ?? 1;

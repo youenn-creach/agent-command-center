@@ -46,7 +46,7 @@ export function RequestsCard({ requests, go }: { requests: DashboardState["reque
                           <ul className="mt-2 space-y-1.5">
                             {r.answer.items.map((it, i) => (
                               <li key={i} className="rounded-md bg-panel px-2 py-1.5">
-                                {it.href?.startsWith("https://calendar.google.com/") ? (
+                                {it.href?.startsWith("https://") ? (
                                   <a className="font-medium text-accent underline" href={it.href} target="_blank" rel="noopener noreferrer">
                                     {it.title}
                                   </a>

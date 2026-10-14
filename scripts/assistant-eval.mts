@@ -53,6 +53,16 @@ const CASES: [string, Skill | Skill[]][] = [
   ["from my emails, check when i registered for a race, then add it to my calendar", "event_from_email"],
   ["find the concert tickets in my email and add the concert to my calendar", "event_from_email"],
   ["add my dentist appointment from the confirmation email to my calendar", "event_from_email"],
+  // Several steps in one request (the app also corrects a one-step pick for these)
+  ["remind me to renew my car insurance a week before it expires, it's in my emails", ["reminder_from_email", "reminder"]],
+  ["find the water bill in my email and remind me to pay it before the deadline", "reminder_from_email"],
+  ["make reminders out of everything I need to do from this week's emails", ["deadlines_to_reminders", "inbox_review"]],
+  ["will I need an umbrella on my trip?", ["trip_weather", "weather"]],
+  ["get me ready for all of today's meetings", ["prep_day", "meeting_prep"]],
+  ["follow up with everybody who hasn't gotten back to me", ["nudge_all", "nudge"]],
+  ["look up when the Lisbon half marathon is and put it in my calendar", ["event_from_web", "web_search"]],
+  ["accept Marc's invitation to the barbecue and add it to my calendar", ["reply_and_add", "draft_reply"]],
+  ["who won the champions league last season?", "web_search"],
   // Reminders
   ["remind me to call mom tomorrow at 6pm", "reminder"],
   ["remind me to renew my passport next month", "reminder"],
