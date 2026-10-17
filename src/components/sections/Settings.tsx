@@ -235,6 +235,7 @@ export function SettingsView({ state, refresh }: SectionProps) {
         <AutomationsCard state={state} refresh={refresh} />
 
         <CalendarModeCard state={state} refresh={refresh} />
+        <CloudRouterCard state={state} refresh={refresh} />
 
         <NotificationsCard state={state} refresh={refresh} />
         <WeatherCard state={state} refresh={refresh} />
@@ -618,6 +619,64 @@ function CalendarModeCard({ state, refresh }: SectionProps) {
           </span>
         </label>
       </fieldset>
+    </Card>
+  );
+}
+
+/** Optional cloud help for understanding requests (Mistral API, free tier only). Off by default; the key is write-only. */
+function CloudRouterCard({ state, refresh }: SectionProps) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const [key, setKey] = useState("");
+  const c = state.cloudRouter;
+  const save = async (body: Record<string, unknown>, done: string) => {
+    setBusy(true);
+    try {
+      await post("/api/settings", { op: "cloud-router", ...body });
+      toast(done, "ok");
+      setKey("");
+      await refresh();
+    } catch (e) {
+      toast((e as Error).message, "danger");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Card title="Understanding requests (optional cloud help)" subtitle="Off by default. When on, Mistral’s API chooses which skill answers your request. Only the words you type in Ctrl+K and the list of skills are sent; your mail, notes, calendar and drafts never leave this computer.">
+      <label className="flex items-start gap-2 text-sm">
+        <input type="checkbox" className="mt-1" checked={c.enabled} disabled={busy || (!c.hasKey && !c.enabled)} onChange={(e) => save({ enabled: e.target.checked }, e.target.checked ? "Cloud help for understanding is on" : "Cloud help for understanding is off")} />
+        <span>
+          <span className="font-medium">Use the Mistral API to understand requests</span>
+          <span className="block text-xs text-muted">
+            {c.blocked && c.enabled ? `Not used right now: ${c.blocked}. The local model answers. ` : ""}
+            {c.hasKey ? `Today: ${c.usedToday} of ${c.cap} requests.` : "Save a key first."}
+          </span>
+        </span>
+      </label>
+      <p className="mt-2 rounded-md bg-panel-2 px-2.5 py-2 text-xs text-muted">
+        Free only: create a key on Mistral&apos;s free Experiment plan (console.mistral.ai) and add no payment method, so nothing can be billed. The app stops at {c.cap} requests a day and, on any rate-limit, quota or payment message from Mistral, goes back to the local model until the next day.
+      </p>
+      <div className="mt-3 flex flex-wrap items-end gap-2">
+        <Field label={c.hasKey ? "Replace the API key" : "API key"}>
+          <input type="password" autoComplete="off" className={inputCls} value={key} placeholder={c.hasKey ? "saved (hidden)" : "paste your key"} onChange={(e) => setKey(e.target.value.trim())} />
+        </Field>
+        <Button busy={busy} disabled={!key} onClick={() => save({ key }, "API key saved (sealed on this computer)")}>
+          Save key
+        </Button>
+        {c.hasKey && (
+          <Button variant="ghost" busy={busy} onClick={() => save({ key: "", enabled: false }, "API key removed")}>
+            Remove key
+          </Button>
+        )}
+        <Field label="Model">
+          <select className={inputCls} value={c.model} disabled={busy} onChange={(e) => save({ model: e.target.value }, `Cloud model: ${e.target.value}`)}>
+            <option value="mistral-small-latest">Mistral Small (recommended)</option>
+            <option value="ministral-8b-latest">Ministral 8B</option>
+            <option value="mistral-medium-latest">Mistral Medium</option>
+          </select>
+        </Field>
+      </div>
     </Card>
   );
 }

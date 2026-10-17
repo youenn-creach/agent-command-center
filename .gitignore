@@ -58,3 +58,4 @@ next-env.d.ts
 
 # private launch notes (quote real inbox numbers)
 /launch
+.vitest/

@@ -66,7 +66,9 @@ They have separate data. The link at the top right switches between them.
 
 ## Ctrl+K: ask the Chief of Staff
 
-Press <kbd>Ctrl</kbd>+<kbd>K</kbd> and ask in your own words. The local model (Ministral 3B by default) reads your request and picks one of the assistant's skills; ordinary code then does the work, under the same permissions as the agents. Understanding a request takes about 10–40 seconds on a laptop (the model warms up as soon as you open the bar); the reply says how it was understood.
+Press <kbd>Ctrl</kbd>+<kbd>K</kbd> (or click the prompt bar at the top) and ask in your own words; long requests wrap onto several lines (Enter sends, Shift+Enter adds a line). The local model reads your request and picks one of the assistant's skills; ordinary code then does the work, under the same permissions as the agents. Ministral 8B is the recommended model (Settings → Local language models); it understands requests better than the 3B. Understanding a request takes about 10–40 seconds on a laptop (the model warms up as soon as you open the bar).
+
+**“Understood as … · Not right?”** Under each answer, the app says how it understood you. If that's wrong, click **Not right?** and pick what you meant: the request runs again that way, and your choice is kept on this computer as an example, so similar requests are understood right next time. Your corrections are part of your data (exported and erased with it) and are never sent to the optional cloud help.
 
 | Ask, for example | What happens |
 |---|---|
@@ -75,10 +77,12 @@ Press <kbd>Ctrl</kbd>+<kbd>K</kbd> and ask in your own words. The local model (M
 | “what's my booking reference for the Lisbon hotel?” · “how much was my last electricity bill?” | Finds the emails, reads them and answers with sources |
 | “prep me for my meeting with Laura” | A short brief from the calendar entry, recent emails and your notes |
 | “what's on tomorrow?” · “am I free friday afternoon?” · “what do I have next week?” | Your calendar for that day or period, with overlaps flagged |
+| “where's the spanish exchange?” · “on which day are my long runs?” · “anything after lunch?” · “am I free at 3pm tomorrow?” | A direct answer from your calendar: the place and time of that event, the weekday it falls on, what comes after a point in the day, or yes/no for that moment |
 | “put dinner with Laura on saturday at 8pm in my calendar” · “block monday morning for deep work” | Prepares the event (see below) |
 | “add my flights to my calendar” | One event per upcoming flight found in your booking emails |
 | “check when I registered for the race in my emails and add it to my calendar” · “put the concert I bought tickets for in my calendar” | Searches your mail (also in French, Spanish and Catalan), reads the best matches, takes the event's date, time and place from them and prepares the event for your approval. It never guesses a date, and tells you if the event is already over or already in your calendar |
 | “remind me to call mom tomorrow at 6pm” | A reminder on Today, due at that time |
+| “remind me the morning of the boiler inspection to clear the cupboard” · “…the evening before the hike to pack” · “…before the committee to print the agenda” | A reminder placed relative to that event, found in your calendar or, if only an email mentions it, in your mail |
 | “reply to Ana that Thursday works” | The local model writes the reply in Ana's language; it waits for your approval as a Gmail draft |
 | “chase Priya about the quote” · “who hasn't answered me?” | A polite follow-up in the same thread, for approval · the list of quiet threads |
 | “what trips do I have coming up?” · “what am I paying for every month?” | Trips and bookings · subscriptions that look paid |
@@ -99,6 +103,15 @@ Exact commands still work instantly, without the model: `add event: dentist tues
 **What it won't do.** It never sends, approves, deletes, pays or changes permissions (those are yours, on the right page), and it never handles passwords. It can't book or buy: it says so instead of guessing. Emails it reads are untrusted: they're shown to the model as data, never stored, and an email that tries to instruct an AI isn't shown to the model at all (you're told to check it yourself).
 
 **Your requests** (Today) keeps every request with its status and answer: click one to read it. Long requests show their progress (“Reading email 4 of 18…”) and notify you when ready if notifications are on.
+
+## Optional: cloud help for understanding requests
+
+Off by default. In **Settings → Understanding requests**, you can let Mistral's API choose which skill answers a Ctrl+K request.
+Only the words you type and the list of skills are sent; your mail, notes, calendar and drafts stay on this computer, and the
+answer is still built locally. It is meant to be free: use a key from Mistral's free Experiment plan with no payment method on
+the account. The app stops after a daily number of requests (200 by default) and, if Mistral answers with a rate-limit, quota or
+payment message, it uses the local model again until the next day. Requests it understood say “mistral-api” on the request board.
+Never used in the demo app.
 
 ## Calendar events: two ways
 
@@ -130,4 +143,9 @@ If a draft comes back in the wrong language, it's retried once and otherwise rep
 - **"Ollama off" in the sidebar**: the local model isn't running. Briefings still work with a plain template.
 - **A schedule says "blocked"**: an agent lost a permission it needs. The reason is shown, and it unblocks by itself when the permission is back.
 - **The computer feels slow**: Settings → Local language models → **Offload now**.
+- **Memory guard** (installed with `npm run guard:install`): a small background service checks memory every 2 seconds. When
+  free memory and swap get close to running out, or the system starts stalling on memory, it unloads the local models
+  (the 8B alone holds about 6 GB) and shows a desktop notification saying why. The model loads again on the next request.
+  It never closes anything else; if memory stays critical without a model loaded, it only warns and names the biggest
+  programs. History: `data/memory-guard.log`. Remove it with `npm run guard:uninstall`.
 - **Backups**: `npm run db:backup` (they're also taken before every update).

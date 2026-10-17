@@ -173,3 +173,54 @@ main .grid > * {
     transition: none !important;
   }
 }
+
+/* The prompt bar: a thin gradient frame (accent → violet) that brightens and glows on focus, and flows while the assistant
+   works. Quiet on purpose; the motion stops with reduced motion (rule above). */
+.prompt-shell {
+  border-radius: 14px;
+  padding: 1px;
+  background: linear-gradient(110deg, color-mix(in oklab, var(--accent) 35%, var(--border)), color-mix(in oklab, var(--voyage) 30%, var(--border)), color-mix(in oklab, var(--accent) 35%, var(--border)));
+  background-size: 200% 100%;
+  box-shadow: 0 1px 2px color-mix(in oklab, var(--text) 6%, transparent);
+  transition: box-shadow 0.25s ease;
+}
+.prompt-shell:focus-within,
+.prompt-shell[data-busy="true"] {
+  background-image: linear-gradient(110deg, var(--accent), var(--voyage), var(--accent));
+  box-shadow:
+    0 0 0 3px color-mix(in oklab, var(--accent) 16%, transparent),
+    0 10px 32px -10px color-mix(in oklab, var(--voyage) 55%, transparent);
+}
+.prompt-shell[data-busy="true"] {
+  animation: prompt-flow 2.4s linear infinite;
+}
+.prompt-inner {
+  border-radius: 13px;
+  background: var(--panel);
+}
+/* The frame's glow is the focus indicator here. */
+.prompt-inner textarea:focus-visible {
+  outline: none;
+}
+.prompt-send {
+  background: linear-gradient(135deg, var(--accent), var(--voyage));
+}
+.prompt-send:hover {
+  filter: brightness(1.1);
+}
+.shimmer-text {
+  background: linear-gradient(90deg, var(--muted) 20%, var(--text) 50%, var(--muted) 80%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: prompt-flow 2.2s linear infinite;
+}
+@keyframes prompt-flow {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}

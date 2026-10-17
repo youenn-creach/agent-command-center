@@ -69,7 +69,9 @@ export const DRAFT_RULES = [
 /** Parses "SUMMARY: … REPLY: …" from a small model; returns null if the output is unusable. */
 export function parseDraft(out: string): { summary: string; reply: string } | null {
   // "SUMMARY :" too: French typography puts a space before the colon.
-  const m = out.match(/SUMMARY\s*:\s*(.+?)\s*REPLY\s*:\s*([\s\S]+)/i);
+  // Models also bold the labels ("**SUMMARY:**") or drop "REPLY:" and separate with "---" or a blank line.
+  const plain = out.replace(/\*\*|__/g, "").replace(/^#+\s*/gm, "");
+  const m = plain.match(/SUMMARY\s*:\s*(.+?)\s*REPLY\s*:\s*([\s\S]+)/i) ?? plain.match(/SUMMARY\s*:\s*([^\n]+?)\s*(?:\n\s*-{3,}\s*\n|\n\s*\n)\s*([\s\S]+)/i);
   if (!m) return null;
   const summary = m[1].replace(/\s+/g, " ").trim().slice(0, 160);
   // Small models often end with "[Your Name]" despite the rules: drop placeholder-only lines.
@@ -97,7 +99,7 @@ export function draftSystemPrompt(lang: Lang | null, about: string, sender: stri
 export async function writeReply(llm: LlmProvider, sender: string, subject: string, text: string, name: string | null, about = "", lang: Lang | null = null, instruction = "") {
   if (!text && !instruction) return { summary: null as string | null, reply: holdingReplyIn(lang, name), writer: "template" };
   // The user's own instruction ("say Thursday works") is trusted; the email itself stays fenced data.
-  const system = [draftSystemPrompt(lang, about, sender), instruction ? `The user wants this reply to say: ${instruction}. Say exactly that, politely and briefly; add nothing they didn't ask for.` : ""].filter(Boolean).join("\n\n");
+  const system = [draftSystemPrompt(lang, about, sender), instruction ? `The user wants this reply to say: ${instruction}. Say exactly that, politely and briefly; add nothing they didn't ask for. Never name a title, place, person, date or amount that is not written in the email or in the user's words; when the user refers to something without naming it, use their exact words.` : ""].filter(Boolean).join("\n\n");
   const email = text ? fenceUntrusted(`email from ${sender}`, `Subject: ${subject}\n\n${text}`) : `(The email isn't shown. Subject: ${subject.replace(/[<>]/g, "")})`;
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -106,7 +108,9 @@ export async function writeReply(llm: LlmProvider, sender: string, subject: stri
       if (!parsed) break;
       // A reply in the wrong language (e.g. English to a Catalan email) gets one retry, then the holding reply.
       const got = lang ? detectLanguage(parsed.reply) : null;
-      if (!lang || !got || got === lang) return { ...parsed, writer: out.model };
+      // A sender without a name ("landlord@example.com"): greet them without their address.
+      const reply = parsed.reply.replace(/^(\s*(?:hi|hello|dear)\s+)[^\s,@]+@[^\s,]+,/i, "$1there,").replace(/\n\s*-{3,}\s*$/, "").trim();
+      if (!lang || !got || got === lang) return { ...parsed, reply, writer: out.model };
     }
   } catch {
     // local LLM unavailable: fall through to the holding reply

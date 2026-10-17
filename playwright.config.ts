@@ -15,7 +15,8 @@ import path from "node:path";
 
 const candidates = [process.env.PLAYWRIGHT_BROWSER_PATH, "/opt/brave.com/brave/brave", "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"].filter(Boolean) as string[];
 const executablePath = candidates.find((p) => existsSync(p));
-const dataDir = path.join(process.cwd(), ".e2e-data");
+// Its own subfolder: the test server wipes it, and .e2e-data also holds evaluation runs that must survive.
+const dataDir = path.join(process.cwd(), ".e2e-data", "playwright");
 // Screenshots can show the measured search quality (imported from the last `npm run eval`) and,
 // with SCREENSHOTS_LIVE=1, Atlas + Voyage on the fictional corpus. Tests never do either.
 const shots = Boolean(process.env.SCREENSHOTS || process.env.RECORDING);

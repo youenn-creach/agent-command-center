@@ -90,6 +90,9 @@ export async function proposeNudge(ctx: Ctx, threadId: string) {
   const subject = /^re:/i.test(w.subject) ? w.subject : `Re: ${w.subject}`;
   const body = `Hi${first ? ` ${first}` : ""},\n\nJust following up on my message below. Any news?\n\nThanks!`;
   const demo = w.is_demo === 1;
+  // Asked twice ("chase Priya" this morning, again now): the follow-up already waiting for approval is the answer, not a second draft.
+  const pending = one<{ id: string }>(ctx.db, "SELECT id FROM actions WHERE idempotency_key LIKE ? AND status = 'proposed' ORDER BY created_at DESC LIMIT 1", `nudge:${w.thread_id}:%`);
+  if (pending) return { actionId: pending.id, existing: true };
   try {
     const out = await callTool(
       ctx,
@@ -104,7 +107,7 @@ export async function proposeNudge(ctx: Ctx, threadId: string) {
       },
       new RunBudget(1, 5000),
     );
-    return { actionId: out.actionId };
+    return { actionId: out.actionId, existing: false };
   } catch (err) {
     if (denied(err)) throw new InsightError(demo ? "The Follow-up agent can't prepare replies on Demo Gmail." : "The Follow-up agent can't prepare Gmail drafts yet. Connect “Gmail drafts” and grant it in Connections & Permissions.");
     throw err;

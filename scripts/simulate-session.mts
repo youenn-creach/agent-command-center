@@ -1,7 +1,7 @@
 import "./_env.mts";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
-import { openDb } from "@/server/db";
+import { openDb, setSetting } from "@/server/db";
 import { resetDemo } from "@/server/seed/seed";
 import { setNotifyDeps } from "@/server/notify";
 import { runCommand } from "@/server/agents/command";
@@ -9,6 +9,14 @@ import { workflows } from "@/server/agents/chiefOfStaff";
 import { listRequests } from "@/server/requests";
 import { setServiceLevel, setAgentLevel } from "@/server/policy/permissions";
 import { listActions } from "@/server/approvals";
+import { BATCH3 } from "./sim-batch3";
+import { BATCH4 } from "./sim-batch4";
+import { BATCH5 } from "./sim-batch5";
+import { BATCH6 } from "./sim-batch6";
+import { BATCH7 } from "./sim-batch7";
+import { BATCH8 } from "./sim-batch8";
+import { BATCH9 } from "./sim-batch9";
+import { connectFakeGmail } from "./sim-gmail";
 
 /**
  * A scripted session of Ctrl+K requests through the real app code and the real local model, on a throwaway
@@ -21,9 +29,17 @@ setNotifyDeps({ desktop: async () => {}, push: async () => 200 });
 // SIM_SET=real runs the second batch on a COPY of the real database (made by the caller into ACC_DATA_DIR):
 // real mail and calendar are only read; everything written (reminders, proposals) stays in the copy.
 const real = process.env.SIM_SET === "real";
-const ctx = { db: openDb(path.join(process.env.ACC_DATA_DIR ?? "data", "acc.sqlite")), now: () => new Date() };
+// SIM_NOW fixes the clock (e.g. 2026-10-15T08:30:00Z) so expectations written once never go stale; it moves on with real time
+// from there, so "in 2 hours" and queued work still behave.
+const started = Date.now();
+const fixed = process.env.SIM_NOW ? Date.parse(process.env.SIM_NOW) : null;
+const ctx = { db: openDb(path.join(process.env.ACC_DATA_DIR ?? "data", "acc.sqlite")), now: () => (fixed ? new Date(fixed + (Date.now() - started)) : new Date()) };
 if (!real) resetDemo(ctx);
+// Batch 3 mixes mail with calendar and web: it gets a fake Gmail holding the demo mails (scripts/sim-gmail.ts).
+if (["batch3", "batch4", "batch5", "batch6", "batch7", "batch8", "batch9"].includes(process.env.SIM_SET ?? "")) await connectFakeGmail(ctx);
 setServiceLevel(ctx, "web-search", "read");
+// SIM_SELFCHECK=off measures the app without the self-check (to see what it adds).
+if (process.env.SIM_SELFCHECK === "off") setSetting(ctx.db, "assistant.selfcheck", "off");
 setAgentLevel(ctx, "knowledge", "web-search", "read");
 
 const DEMO_REQUESTS = [
@@ -74,10 +90,26 @@ const REAL_REQUESTS = [
   "quand est mon prochain vol ?",
   "summarize everything that happened in my inbox today, then draft replies to anything urgent",
 ];
-const REQUESTS = real ? REAL_REQUESTS : DEMO_REQUESTS;
+// SIM_SET=batch3: complex asks on the demo data, each with the expected outcome written beforehand (sim-batch3.ts).
+// SIM_SET=batch4 is the held-out batch (sim-batch4.ts): run it only on a frozen commit.
+const EXPECTED = { batch3: BATCH3, batch4: BATCH4, batch5: BATCH5, batch6: BATCH6, batch7: BATCH7, batch8: BATCH8, batch9: BATCH9 }[process.env.SIM_SET ?? ""] ?? null;
+const REQUESTS = EXPECTED ? EXPECTED.map((b) => b.text) : real ? REAL_REQUESTS : DEMO_REQUESTS;
 
 const range = process.argv[2]?.match(/^(\d+)-(\d+)$/);
 const picked = REQUESTS.map((text, i) => ({ text, n: i + 1 })).filter((r) => !range || (r.n >= +range[1] && r.n <= +range[2]));
+
+// Like the app (it warms the router when Ctrl+K opens): the first request would otherwise wait minutes for the model to load.
+{
+  const { routerModel, warmRouter } = await import("@/server/agents/assistant");
+  const t0 = Date.now();
+  warmRouter(ctx, false);
+  for (let i = 0; i < 90; i++) {
+    const loaded = await fetch(new URL("/api/ps", process.env.OLLAMA_URL ?? "http://127.0.0.1:11434")).then((r) => r.json() as Promise<{ models?: { name: string }[] }>).catch(() => ({ models: [] }));
+    if (loaded.models?.some((m) => m.name === routerModel(ctx))) break;
+    await new Promise((r) => setTimeout(r, 10_000));
+  }
+  console.log(`(model warmed in ${Math.round((Date.now() - t0) / 1000)} s)`);
+}
 
 const queue = () => (globalThis as { __accBackground?: { tail: Promise<void> } }).__accBackground?.tail ?? Promise.resolve();
 const rows: Record<string, unknown>[] = [];
@@ -95,7 +127,21 @@ for (const { text, n } of picked) {
   const board = listRequests(ctx).find((r) => r.text === text);
   const answer = (board?.answer?.reply ?? direct.reply).replace(/\s+/g, " ");
   const proposed = listActions(ctx).filter((a) => !before.has(a.id)).map((a) => a.title);
-  const row = { n, text, intent: direct.intent, understood: (direct as { understood?: string }).understood ?? "", askedMs, totalMs: Date.now() - t, state: board?.state, status: board?.status, answer: answer.slice(0, 400), items: (board?.answer?.items ?? direct.items ?? []).length, proposed };
+  const row = { n, text, intent: direct.intent, understood: (direct as { understood?: string }).understood ?? "", askedMs, totalMs: Date.now() - t, state: board?.state, status: board?.status, asked: (direct as { asked?: boolean }).asked ?? false, answer: answer.slice(0, 1200), items: ((board?.answer?.items ?? direct.items ?? []) as { title: string; detail?: string }[]).map((i) => `${i.title}${i.detail ? ` — ${i.detail}` : ""}`).slice(0, 12), proposed };
+  const exp = EXPECTED ? EXPECTED[n - 1] : undefined;
+  if (exp) {
+    const auto: string[] = [];
+    const shown = ((board?.answer?.items ?? (direct as { items?: { title: string; detail?: string }[] }).items ?? []) as { title: string; detail?: string }[]).map((i) => `${i.title} ${i.detail ?? ""}`).join(" ");
+    for (const re of exp.must ?? []) if (!re.test(answer + " " + shown + " " + proposed.join(" "))) auto.push(`missing ${re}`);
+    for (const re of exp.never ?? []) if (re.test(answer + " " + shown)) auto.push(`forbidden ${re}`);
+    // Asking instead of acting is a last resort: for the error rate it counts as a miss (the user's rule).
+    if ((direct as { asked?: boolean }).asked) auto.push("ASKED a question instead of acting (counts as an error)");
+    if (exp.proposes === "none" && proposed.length) auto.push(`prepared ${proposed.length} action(s), expected none`);
+    if (typeof exp.proposes === "number" && proposed.length !== exp.proposes) auto.push(`prepared ${proposed.length} action(s), expected ${exp.proposes}`);
+    Object.assign(row, { want: exp.want, autoCheck: auto });
+    console.log(`   ITEMS: ${(row.items as string[]).join(" | ").slice(0, 600)}`);
+    console.log(`   WANT: ${exp.want}\n   AUTO: ${auto.length ? auto.join("; ") : "pass"}`);
+  }
   rows.push(row);
   console.log(`#${n} [${row.intent}] ${Math.round(row.askedMs / 1000)}s+${Math.round((row.totalMs - row.askedMs) / 1000)}s ${row.state ?? ""} | ${text}\n   → ${answer.slice(0, 300)}${proposed.length ? `\n   ⏳ waiting for approval: ${proposed.join(" | ")}` : ""}`);
 }

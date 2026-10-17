@@ -6,6 +6,10 @@ import type { PreparedEvent } from "@/server/agents/eventParse";
 import { post } from "./api";
 import { Button, cx, Spinner } from "./ui";
 import type { Go } from "./Dashboard";
+import { CHOICES, choiceLabel } from "@/server/agents/choices";
+
+/** The longest request accepted (the server checks the same limit). */
+const MAX = 500;
 
 const EXAMPLES = ["add event: dentist tuesday 3pm", "add my flights to my calendar", "brief me", "find Lisbon", "what's waiting for me?", "what's scheduled?", "weekly review", "draft follow-ups"];
 
@@ -15,7 +19,11 @@ export function CommandBar({ go, refresh }: { go: Go; refresh: () => Promise<voi
   const [busy, setBusy] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [result, setResult] = useState<CommandResult | { error: string } | null>(null);
-  const input = useRef<HTMLInputElement>(null);
+  const input = useRef<HTMLTextAreaElement>(null);
+  const [focused, setFocused] = useState(false);
+  // The request the shown answer is for, and whether the "not right?" choices are open.
+  const [askedText, setAskedText] = useState("");
+  const [fixing, setFixing] = useState(false);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -37,13 +45,24 @@ export function CommandBar({ go, refresh }: { go: Go; refresh: () => Promise<voi
     return () => clearInterval(t);
   }, [busy]);
 
-  async function ask(q: string) {
+  // The field grows with the request (up to about six lines), so a long sentence can be read whole before it is sent.
+  useEffect(() => {
+    const el = input.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 168)}px`;
+  }, [text]);
+
+  /** `chosen`: the kind of request the user picked under a previous answer ("not right?"); it runs that way and is remembered. */
+  async function ask(q: string, chosen?: { skill: string; wrong?: string }) {
     if (!q.trim()) return;
     setResult(null);
+    setFixing(false);
+    setAskedText(q);
     setElapsed(0);
     setBusy(true);
     try {
-      setResult(await post<CommandResult>("/api/command", { text: q }));
+      setResult(await post<CommandResult>("/api/command", chosen ? { text: q, skill: chosen.skill, wrong: chosen.wrong } : { text: q }));
       await refresh();
     } catch (e) {
       setResult({ error: (e as Error).message });
@@ -53,7 +72,8 @@ export function CommandBar({ go, refresh }: { go: Go; refresh: () => Promise<voi
   }
 
   return (
-    <div className="relative w-full max-w-md">
+    // Phones: the bar gets its own row under the header (it is the main way in); wider screens: inline.
+    <div className="relative order-last w-full basis-full md:order-none md:max-w-2xl md:basis-auto">
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -63,36 +83,64 @@ export function CommandBar({ go, refresh }: { go: Go; refresh: () => Promise<voi
         <label htmlFor="cmd" className="sr-only">
           Ask your Chief of Staff
         </label>
-        <input
-          id="cmd"
-          ref={input}
-          value={text}
-          maxLength={300}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="Ask your Chief of Staff…  (Ctrl+K)"
-          autoComplete="off"
-          onFocus={() => {
-            // Wake the local model while the user types (the server limits this to once a minute).
-            void post("/api/command", { op: "warm" }).catch(() => {});
-          }}
-          // Commands mix languages and short forms ("rdv : …"): no red spell-check underlines.
-          spellCheck={false}
-          className="w-full rounded-lg border border-line bg-panel px-3 py-1.5 pr-8 text-sm placeholder:text-muted focus:border-accent"
-        />
-        {busy && (
-          <span className="absolute right-2.5 top-2 text-muted">
-            <Spinner />
-          </span>
-        )}
+        <div className="prompt-shell" data-busy={busy}>
+          <div className="prompt-inner flex items-start gap-2 px-3 py-1.5">
+            <Sparkle busy={busy} />
+            <textarea
+              id="cmd"
+              ref={input}
+              rows={1}
+              value={text}
+              maxLength={MAX}
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => {
+                // Enter sends; Shift+Enter starts a new line (and Enter while an input method composes a word does neither).
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  void ask(text);
+                }
+              }}
+              placeholder="Ask or tell your Chief of Staff anything…"
+              autoComplete="off"
+              onFocus={() => {
+                setFocused(true);
+                // Wake the local model while the user types (the server limits this to once a minute).
+                void post("/api/command", { op: "warm" }).catch(() => {});
+              }}
+              onBlur={() => setFocused(false)}
+              // Commands mix languages and short forms ("rdv : …"): no red spell-check underlines.
+              spellCheck={false}
+              className="max-h-[168px] min-h-6 flex-1 resize-none bg-transparent py-0.5 text-sm leading-6 outline-none placeholder:text-muted"
+            />
+            <span className="flex h-7 shrink-0 items-center gap-1.5">
+              {text.length > MAX - 60 && <span className="text-[11px] tabular-nums text-muted">{MAX - text.length}</span>}
+              {busy ? (
+                <span className="text-muted">
+                  <Spinner />
+                </span>
+              ) : text.trim() ? (
+                <button type="submit" aria-label="Send" title="Send (Enter) · new line: Shift+Enter" className="prompt-send grid h-7 w-7 place-items-center rounded-lg text-white">
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" />
+                  </svg>
+                </button>
+              ) : (
+                !focused && <kbd className="hidden rounded-md border border-line px-1.5 py-0.5 font-sans text-[10px] text-muted sm:inline">Ctrl K</kbd>
+              )}
+            </span>
+          </div>
+        </div>
       </form>
       {busy && !result && (
-        <div role="status" className="absolute left-0 right-0 top-10 z-30 rounded-xl border border-line bg-panel p-3 text-sm shadow-xl">
-          <p>Understanding your request with the local model… {elapsed > 0 && <span className="tabular-nums text-muted">{elapsed} s</span>}</p>
+        <div role="status" className="absolute left-0 right-0 top-full z-30 mt-2 rounded-xl border border-line bg-panel p-3 text-sm shadow-xl">
+          <p>
+            <span className="shimmer-text">Understanding your request with the local model…</span> {elapsed > 0 && <span className="tabular-nums text-muted">{elapsed} s</span>}
+          </p>
           <p className="mt-1 text-xs text-muted">This usually takes 10–40 seconds on this computer. Nothing is sent or changed without your approval.</p>
         </div>
       )}
       {result && (
-        <div role="dialog" aria-label="Chief of Staff reply" className="absolute left-0 right-0 top-10 z-30 rounded-xl border border-line bg-panel p-3 text-sm shadow-xl">
+        <div role="dialog" aria-label="Chief of Staff reply" className="absolute left-0 right-0 top-full z-30 mt-2 rounded-xl border border-line bg-panel p-3 text-sm shadow-xl">
           {"error" in result ? (
             <p className="text-danger">{result.error}</p>
           ) : (
@@ -127,8 +175,33 @@ export function CommandBar({ go, refresh }: { go: Go; refresh: () => Promise<voi
               )}
             </>
           )}
+          {"intent" in result && fixing && (
+            <div className="mt-2 rounded-lg border border-line bg-panel-2 p-2">
+              <p className="text-xs text-muted">What did you mean? I’ll do it that way and remember it for next time.</p>
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {CHOICES.filter((c) => c.skill !== result.skill).map((c) => (
+                  <button key={c.skill} className="rounded-full border border-line bg-panel px-2 py-0.5 text-[11px] hover:border-accent hover:text-ink" onClick={() => void ask(askedText, { skill: c.skill, wrong: result.skill })}>
+                    {c.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="mt-2 flex items-center justify-end gap-2">
-            {"understood" in result && result.understood && <span className="mr-auto text-[11px] text-muted">Understood by {result.understood}</span>}
+            {"understood" in result && result.understood && (
+              <span className="mr-auto text-[11px] text-muted">
+                {choiceLabel(result.skill) ? <>Understood as “{choiceLabel(result.skill)}” · </> : null}
+                {result.understood === "your choice" ? "your choice, remembered" : `by ${result.understood}`}
+                {result.understood !== "your choice" && !result.asked && askedText && (
+                  <>
+                    {" · "}
+                    <button className="underline decoration-dotted underline-offset-2 hover:text-ink" aria-expanded={fixing} onClick={() => setFixing((f) => !f)}>
+                      Not right?
+                    </button>
+                  </>
+                )}
+              </span>
+            )}
             {"intent" in result && result.section && (
               <Button onClick={() => { go(result.section!); setResult(null); }}>Open</Button>
             )}
@@ -139,6 +212,22 @@ export function CommandBar({ go, refresh }: { go: Go; refresh: () => Promise<voi
         </div>
       )}
     </div>
+  );
+}
+
+/** The prompt bar's mark: a small four-point star, gently pulsing while the assistant works. */
+function Sparkle({ busy }: { busy: boolean }) {
+  return (
+    <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden className={cx("mt-1 shrink-0", busy && "animate-pulse")}>
+      <defs>
+        <linearGradient id="prompt-spark" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="var(--accent)" />
+          <stop offset="1" stopColor="var(--voyage)" />
+        </linearGradient>
+      </defs>
+      <path fill="url(#prompt-spark)" d="M10 1.5c.5 3.9 2.6 6 6.5 6.5-3.9.5-6 2.6-6.5 6.5-.5-3.9-2.6-6-6.5-6.5 3.9-.5 6-2.6 6.5-6.5Z" />
+      <path fill="url(#prompt-spark)" opacity=".7" d="M15.5 12.5c.2 1.6 1 2.4 2.5 2.5-1.5.2-2.3 1-2.5 2.5-.2-1.5-1-2.3-2.5-2.5 1.5-.1 2.3-.9 2.5-2.5Z" />
+    </svg>
   );
 }
 

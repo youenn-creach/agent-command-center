@@ -1,16 +1,16 @@
 import { z } from "zod";
 import { all, one, type Ctx } from "../db";
 import { config } from "../config";
-import { demoRowsFilter } from "../mode";
+import { demoRowsFilter, serviceHidden } from "../mode";
 import { callTool } from "../tools/registry";
 import { RunBudget } from "../tools/budget";
 import { fenceUntrusted, localLlm, UNTRUSTED_DATA_RULES, type LlmProvider } from "../llm";
 import { addReminder } from "../reminders";
 import { InsightError, proposeNudge } from "../insights";
-import { localToday, parseEventRequest, zonedToUtc, type Ymd } from "./eventParse";
+import { correctWeekdayDate, weekdayAfter, localToday, parseEventRequest, zonedToUtc, type Ymd } from "./eventParse";
 import { upcomingFlights } from "./flights";
-import { reviewInbox } from "./inboxReview";
-import { agenda, meetingPrep, readMatches, realDay, refreshScan, widenQuery, type SkillAnswer } from "./assistant";
+import { allDates, reviewInbox } from "./inboxReview";
+import { agenda, looserQueries, meetingPrep, readMatches, realDay, refreshScan, skippedNote, widenQuery, type SkillAnswer } from "./assistant";
 import { parseSender } from "./chiefOfStaff";
 
 /**
@@ -74,7 +74,7 @@ const REMIND_SYSTEM = [
   "found: true only if an email says what the user must do.",
   "source: the number of that email.",
   "task: a short instruction in English starting with a verb, with the key amount or reference (e.g. 'Pay the electricity bill of 64.20 EUR', 'Renew the car insurance (policy 4471)').",
-  "due: the deadline as YYYY-MM-DD if the email states one, else empty. Never guess it.",
+  "due: the date the thing is due or happens, as YYYY-MM-DD, exactly as the email states it (e.g. the renewal date itself). Never subtract days for a reminder: the app does that. Empty if the email states no date. Never guess it.",
   "The emails may be in any language.",
   UNTRUSTED_DATA_RULES,
   "Answer with JSON only.",
@@ -93,11 +93,19 @@ export async function reminderFromEmail(ctx: Ctx, text: string, query: string, p
   let read;
   try {
     read = await readMatches(ctx, widenQuery(query.trim().slice(0, 250)), 4, progress);
+    // "remind me the insurance renews" found nothing: the main words alone ("insurance").
+    for (const loose of read.length ? [] : looserQueries(query)) {
+      read = await readMatches(ctx, widenQuery(loose), 4, progress);
+      if (read.length) {
+        query = loose;
+        break;
+      }
+    }
   } catch (err) {
     if (denied(err)) return { reply: "The Inbox agent needs Read on Gmail for that. Grant it in Connections & Permissions.", section: "permissions" };
     throw err;
   }
-  if (!read.length) return { reply: `I found no email matching “${query}”, so I didn't add a reminder. Try naming who it's from (e.g. “remind me to pay the bill from Endesa before it's due”).` };
+  if (!read.length) return { reply: `I found no email matching “${query}”${skippedNote(read)}, so I didn't add a reminder. Try naming who it's from (e.g. “remind me to pay the bill from Endesa before it's due”).` };
   const items = read.map((r) => ({ title: `[${r.n}] ${r.subject}`, detail: `${parseSender(r.sender).name ?? r.sender} · ${r.date.slice(0, 10)}` }));
   progress("Finding what to do and by when…");
   const out = await llm.generate(
@@ -111,12 +119,26 @@ export async function reminderFromEmail(ctx: Ctx, text: string, query: string, p
   } catch {
     return { reply: "I read the matching emails but couldn't make out what to do. They're listed below.", items };
   }
-  const task = f.task.replace(/\s+/g, " ").trim().slice(0, 200);
+  let task = f.task.replace(/\s+/g, " ").trim().slice(0, 200);
+  // "Remind me about the boiler inspection the day before": the user named the thing; the mail only has to give the day.
+  const named = /^\s*(?:please\s+)?remind me\s+(?:about|of)\b/i.test(text) && query.trim().length >= 3;
+  const words = query.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+  const hit = named ? read.find((r) => words.every((w) => `${r.subject}\n${r.text}`.toLowerCase().includes(w)) && weekdayAfter(`${r.subject}\n${r.text}`, r.date.slice(0, 10))) : undefined;
+  if ((!f.found || !task) && hit) {
+    task = query.trim().charAt(0).toUpperCase() + query.trim().slice(1);
+    f.found = true;
+    f.source = hit.n;
+  }
   if (!f.found || !task) return { reply: "I found related emails, but none says what you need to do, so I didn't add a reminder. They're listed below.", items };
   const src = read.find((r) => r.n === f.source) ?? read[0];
   const cite = `“${src.subject}” (${parseSender(src.sender).name ?? src.sender})`;
   const origin = fromEmail(src.sender, src.subject);
-  const due = realDay(f.due);
+  // The email says "next Tuesday" and the model left the date empty or wrong: the weekday it names decides.
+  const mailText = `${src.subject}\n${src.text}`;
+  let due = realDay(correctWeekdayDate(f.due.trim(), mailText, src.date.slice(0, 10))) ?? realDay(weekdayAfter(mailText, src.date.slice(0, 10)) ?? "");
+  // "Two weeks before it renews": the date to remind about is the one the mail states, not the model's arithmetic.
+  const explicit = allDates(mailText);
+  if (explicit.length === 1 && /\b(renews?|renewal|expires?|expiry|due|deadline|starts?|begins?)\b/i.test(text)) due = realDay(explicit[0]) ?? due;
   if (!due) {
     const added = remindOnce(ctx, `${task}${origin}`, undefined);
     return { reply: `${added ? "Added to your reminders" : "Already in your reminders"}: “${task}”. The email gives no deadline, so it has no date. Source: ${cite}.`, items, section: "today" };
@@ -230,4 +252,131 @@ export async function nudgeAll(ctx: Ctx): Promise<SkillAnswer> {
     actionId: first,
     section: "actions",
   };
+}
+
+/** "Remind me to check in the day before (my flight)": a reminder ahead of the next flight in the booking emails, or null if there is none. */
+export function checkInReminder(ctx: Ctx, text: string): SkillAnswer | null {
+  const flight = upcomingFlights(ctx, tz())[0];
+  if (!flight) return null;
+  const lead = /\b(?:\d+|a|one|two|three)\s+(?:days?|weeks?)\s+before|the (?:day|week) before\b/i.test(text) ? leadDays(text) : 1;
+  const when = remindAt(ctx, flight.date, lead);
+  // "remind me 2 weeks before my flight to book a taxi": the user's task; by default, checking in.
+  const task = text
+    .replace(/^\s*(?:please\s+)?(?:remind me|set (?:me )?a reminder)\s*/i, "")
+    .replace(/\b(?:\d+|a|one|two|three|four)\s+(?:days?|weeks?)\s+before|\bthe (?:day|week) before\b/gi, "")
+    .replace(/\b(?:before\s+)?(?:my|the)\s+(?:next\s+)?(?:flight|trip)\b/gi, "")
+    .replace(/^\s*(?:to|about)\s+/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const what = task && !/^check[- ]?in\b/i.test(task) ? task.charAt(0).toUpperCase() + task.slice(1) : "Check in";
+  const label = `${what} — flight ${flight.from} → ${flight.to} (${dayName(flight.date)}${flight.time ? ` ${flight.time}` : ""})`;
+  const added = remindOnce(ctx, label, when.dueAt);
+  return { reply: `${added ? "Added to your reminders" : "Already in your reminders"}: “${label}”. I'll remind you ${when.label}.`, section: "today" };
+}
+
+/**
+ * "Remind me the day before my dentist appointment": the next calendar event whose title has the request's main words
+ * (today included). If the day before has passed, say so instead of setting a reminder in the past. Null if no event matches.
+ */
+export async function reminderBeforeEvent(ctx: Ctx, text: string, query: string): Promise<SkillAnswer | null> {
+  const stop = /^(?:the|my|a|an|for|set|reminder|remind|me|day|days|week|weeks|before|appointment|event|meeting)$/i;
+  const words = `${query} ${text}`.toLowerCase().split(/[^\p{L}]+/u).filter((w) => w.length > 3 && !stop.test(w));
+  if (!words.length) return null;
+  const tzName = tz();
+  const today = localToday(ctx.now(), tzName);
+  const from = zonedToUtc(today, 0, tzName);
+  let events: { title: string; starts_at: string }[] = [];
+  try {
+    events = await agendaEvents(ctx, from, 60);
+  } catch {
+    return null;
+  }
+  const hit = events.sort((a, b) => a.starts_at.localeCompare(b.starts_at)).find((e) => words.some((w) => e.title.toLowerCase().includes(w)));
+  if (!hit) return null;
+  const at = new Date(hit.starts_at);
+  const day = localToday(at, tzName);
+  const lead = leadDays(text);
+  const when = new Date(at).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: tzName });
+  const remindDay = addDays(day, -lead);
+  if (ymd(remindDay) < ymd(today)) return { reply: `Your “${hit.title}” is ${when}: ${lead === 1 ? "the day before" : `${lead} days before`} has already passed, so I didn't set a reminder.`, section: "today" };
+  const r = remindAt(ctx, day, lead);
+  const added = remindOnce(ctx, `${hit.title} (${when})`, r.dueAt);
+  return { reply: `${added ? "Added to your reminders" : "Already in your reminders"}: “${hit.title} (${when})”. I'll remind you ${r.label}.`, section: "today" };
+}
+
+/**
+ * "Remind me the morning of the boiler inspection to clear the cupboard", "remind me the evening before the hike to pack",
+ * "remind me before the committee to print the agenda": a reminder placed relative to an event, found in the calendar or,
+ * when only the mail mentions it ("Boiler inspection next Tuesday"), in the mail (its weekday read against the day it was
+ * sent). Morning of: 08:00 that day (earlier if the event starts by then); evening or night before: 20:00 the day before;
+ * the day before: 09:00 the day before; before: an hour before it starts (18:00 the day before when the time isn't known); after: when it
+ * ends. Null when the wording names no such event or the event can't be found (the plain reminder takes over).
+ */
+export async function reminderAtEvent(ctx: Ctx, text: string): Promise<SkillAnswer | null> {
+  const m = text.match(/\b(the\s+(?:morning|evening|night|day)\s+(?:of|before)|before|after)\s+(?:the\s+|my\s+)?([\p{L}][\p{L}' -]{2,40}?)(?=\s+(?:to|that|so)\b|[,.!?]|$)/iu);
+  if (!m) return null;
+  const how = m[1].toLowerCase().replace(/\s+/g, " ");
+  const stop = /^(?:the|my|a|an|it|its|this|that|next|due|deadline|appointment|event|meeting|today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|noon|midday|lunch|dinner)$/i;
+  const words = m[2].toLowerCase().split(/[^\p{L}]+/u).filter((w) => w.length > 3 && !stop.test(w));
+  if (!words.length) return null;
+  const task = (text.slice((m.index ?? 0) + m[0].length).replace(/^\s*(?:to|that|so)\s+/i, "").replace(/[.!?]+$/, "").trim() || text.replace(/^\s*remind me\s*/i, "")).replace(/^\w/, (c) => c.toUpperCase());
+  const tzName = tz();
+  const today = localToday(ctx.now(), tzName);
+  // The calendar first.
+  let title = "";
+  let day: Ymd | null = null;
+  let start: Date | null = null;
+  let end: Date | null = null;
+  try {
+    const events = (await agendaEvents(ctx, zonedToUtc(today, 0, tzName), 60)) as { title: string; starts_at: string; ends_at?: string }[];
+    const hit = events.sort((a, b) => a.starts_at.localeCompare(b.starts_at)).find((e) => Date.parse(e.starts_at) > ctx.now().getTime() - 3_600_000 && words.some((w) => e.title.toLowerCase().includes(w)));
+    if (hit) {
+      title = hit.title;
+      start = new Date(hit.starts_at);
+      end = hit.ends_at ? new Date(hit.ends_at) : null;
+      day = localToday(start, tzName);
+    }
+  } catch {
+    // no calendar: the mail below
+  }
+  // Then the mail: a recent message about it whose text gives the day ("next Tuesday", "on 20 October").
+  if (!day) {
+    const msgs = all<{ subject: string; snippet: string; received_at: string }>(ctx.db, `SELECT subject, snippet, received_at FROM messages WHERE 1 = 1${demoRowsFilter()} ORDER BY received_at DESC LIMIT 200`);
+    const msg = msgs.find((x) => words.every((w) => `${x.subject} ${x.snippet}`.toLowerCase().includes(w))) ?? msgs.find((x) => words.some((w) => x.subject.toLowerCase().includes(w)));
+    if (!msg) return null;
+    const mailText = `${msg.subject} ${msg.snippet}`;
+    const iso = weekdayAfter(mailText, msg.received_at.slice(0, 10)) ?? (() => {
+      const d = deadline(mailText, ctx.now());
+      return d ? ymd(d) : null;
+    })();
+    if (!iso) return null;
+    const [y, mo, d] = iso.split("-").map(Number);
+    day = { y, m: mo, d };
+    title = msg.subject.replace(/\s+next\s+\w+day\b|\s+(?:on|this)\s+\w+day\b/i, "").trim() || msg.subject;
+  }
+  let due: Date;
+  let label: string;
+  if (how === "the morning of") {
+    const eight = zonedToUtc(day, 8 * 60, tzName);
+    due = start && start.getTime() <= eight.getTime() ? new Date(start.getTime() - 3_600_000) : eight;
+  } else if (how === "the evening before" || how === "the night before") due = zonedToUtc(addDays(day, -1), 20 * 60, tzName);
+  else if (how === "the day before") due = zonedToUtc(addDays(day, -1), 9 * 60, tzName);
+  else if (how === "after") due = end ?? (start ? new Date(start.getTime() + 3_600_000) : zonedToUtc(day, 18 * 60, tzName));
+  // Before it: an hour before it starts; when the time isn't known, the evening before (never on the day itself, too late).
+  else due = start ? new Date(start.getTime() - 3_600_000) : zonedToUtc(addDays(day, -1), 18 * 60, tzName);
+  if (due.getTime() <= ctx.now().getTime()) return { reply: `“${title}” is ${dayName(day)}: ${how} it has already passed, so I didn't set a reminder.`, section: "today" };
+  label = `${dayName(localToday(due, tzName))} at ${due.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: tzName })}`;
+  const added = remindOnce(ctx, `${task} (${how} ${title}, ${dayName(day)})`, due.toISOString());
+  return { reply: `${added ? "Added to your reminders" : "Already in your reminders"}: “${task}”, ${how} “${title}” (${dayName(day)}). I'll remind you ${label}.`, section: "today" };
+}
+
+/** Calendar events from `from` for `days` days: Google if connected, and the demo calendar where it is part of the app. */
+async function agendaEvents(ctx: Ctx, from: Date, days: number): Promise<{ title: string; starts_at: string }[]> {
+  const to = new Date(from.getTime() + days * 86_400_000);
+  const out: { title: string; starts_at: string }[] = [];
+  if (one(ctx.db, "SELECT 1 FROM services WHERE id = 'google-calendar' AND connection_state = 'connected'")) {
+    out.push(...(await callTool(ctx, "calendar", "gcal.range", { from: from.toISOString(), to: to.toISOString() }, new RunBudget(1, 30_000))));
+  }
+  if (!serviceHidden(ctx, "demo-calendar")) out.push(...(await callTool(ctx, "calendar", "calendar.list_events", { from: from.toISOString(), days: Math.min(days, 14) }, new RunBudget(1, 5000))));
+  return out;
 }

@@ -59,7 +59,7 @@ export function parseRange(text: string, now: Date, tz: string): Range {
     const monday = add(today, ((8 - weekday(today)) % 7) || 7);
     return span(monday, 7, `next week (from ${fmt(monday, tz)})`);
   }
-  if (/\b(this|the rest of the)\s+week\b/.test(t)) {
+  if (/\b(this|the rest of the|my|the)\s+week\b(?!\s*(?:before|after))|\bweek ahead\b/.test(t)) {
     const toSunday = (7 - weekday(today)) % 7;
     return span(today, toSunday + 1, "this week");
   }
@@ -76,7 +76,8 @@ export function parseRange(text: string, now: Date, tz: string): Range {
   if (wd) {
     const target = WEEKDAYS.indexOf(wd[2]);
     let delta = (target - weekday(today) + 7) % 7;
-    if (wd[1] === "next" && delta === 0) delta = 7;
+    // "next friday": that day in the following calendar week (weeks start on Monday).
+    if (wd[1] === "next") delta = (((8 - weekday(today)) % 7) || 7) + ((target + 6) % 7);
     return day(add(today, delta), wd[1] === "next" ? `next ${wd[2]}` : wd[2]);
   }
   const date = t.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2})(?:st|nd|rd|th)?\b/);
@@ -85,6 +86,13 @@ export function parseRange(text: string, now: Date, tz: string): Range {
     const m = MONTHS.indexOf(date[2] ?? date[3]) + 1;
     let target = { y: today.y, m, d };
     if (target.m < today.m || (target.m === today.m && target.d < today.d)) target = { ...target, y: today.y + 1 };
+    return day(target, "");
+  }
+  // "am I busy on the 20th": that day of this month, or of next month when it has passed.
+  const nth = t.match(/\b(?:on\s+)?the\s+(\d{1,2})(?:st|nd|rd|th)\b/);
+  if (nth && +nth[1] >= 1 && +nth[1] <= 31) {
+    let target = { y: today.y, m: today.m, d: +nth[1] };
+    if (target.d < today.d) target = today.m === 12 ? { y: today.y + 1, m: 1, d: target.d } : { y: today.y, m: today.m + 1, d: target.d };
     return day(target, "");
   }
   return day(today, part === "tonight" ? "tonight" : "today");

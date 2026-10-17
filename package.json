@@ -27,6 +27,8 @@
     "app:deploy": "tsx scripts/app-service.mts deploy",
     "app:uninstall": "tsx scripts/app-service.mts uninstall",
     "app:status": "tsx scripts/app-service.mts status",
+    "guard:install": "tsx scripts/app-service.mts guard-install",
+    "guard:uninstall": "tsx scripts/app-service.mts guard-uninstall",
     "demo:install": "tsx scripts/app-service.mts demo-install",
     "demo:uninstall": "tsx scripts/app-service.mts demo-uninstall"
   },

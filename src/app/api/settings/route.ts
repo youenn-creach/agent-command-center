@@ -8,6 +8,7 @@ import { offloadModels } from "@/server/llmRuntime";
 import { notify, NotifyError, NotifySettingsInput, setNotificationSettings } from "@/server/notify";
 import { FeedError } from "@/server/news/feeds";
 import { setCalendarMode } from "@/server/calendarMode";
+import { CLOUD_MODELS, setCloudRouter } from "@/server/cloudRouter";
 import { pruneOldData, RetentionSchema, setRetention } from "@/server/retention";
 
 const Body = z.discriminatedUnion("op", [
@@ -20,6 +21,7 @@ const Body = z.discriminatedUnion("op", [
   z.object({ op: z.literal("notify-settings"), value: NotifySettingsInput }),
   z.object({ op: z.literal("notify-test") }),
   z.object({ op: z.literal("calendar-mode"), mode: z.enum(["app", "link"]) }),
+  z.object({ op: z.literal("cloud-router"), enabled: z.boolean().optional(), key: z.string().max(200).regex(/^[\w.-]*$/).optional(), model: z.enum(CLOUD_MODELS).optional() }),
   z.object({ op: z.literal("language-model"), lang: z.enum(["en", "fr", "es", "ca"]), model: z.string().min(1).max(200).regex(/^[\w.:/-]+$/).nullable() }),
 ]);
 
@@ -45,6 +47,7 @@ export const POST = handler(true, async (req, ctx) => {
     }
     return { ok: true };
   }
+  if (body.op === "cloud-router") return setCloudRouter(ctx, { enabled: body.enabled, key: body.key, model: body.model });
   if (body.op === "language-model") {
     await setLanguageModel(ctx, body.lang, body.model);
     logActivity(ctx, { actor: "user", kind: "system", outcome: "info", summary: body.model ? `Reply drafts in ${LANG_NAMES[body.lang]} now use ${body.model}` : `Reply drafts in ${LANG_NAMES[body.lang]} use the background model` });

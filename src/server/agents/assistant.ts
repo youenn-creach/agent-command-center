@@ -8,17 +8,19 @@ import { RunBudget } from "../tools/budget";
 import { draftLlmFor, fenceUntrusted, localLlm, selectedModel, UNTRUSTED_DATA_RULES, type LlmProvider } from "../llm";
 import { aboutMePrompt } from "../memory";
 import { detectLanguage } from "../lang";
-import { injectionFlags, isAiDirected } from "../retrieval/text";
+import { injectionFlags, isAiDirected, stem } from "../retrieval/text";
 import { knowledgeStats, retrieve } from "../retrieval/knowledge";
 import { nanoModelInstalled } from "../retrieval/embeddings";
 import { check } from "../policy/engine";
-import { addReminder } from "../reminders";
+import { addReminder, listReminders } from "../reminders";
 import { InsightError, proposeNudge } from "../insights";
-import { eventOn, localToday, parseEventRequest, type PreparedEvent } from "./eventParse";
+import { correctWeekdayDate, weekdayAfter, eventOn, localToday, parseEventRequest, zonedToUtc, type PreparedEvent } from "./eventParse";
 import type { WebResult } from "../connectors/websearch";
 import { parseRange } from "./when";
 import { parseSender, writeReply } from "./chiefOfStaff";
 import { upcomingFlights } from "./flights";
+import { similarExamples } from "./examples";
+import { userExamples } from "./corrections";
 
 /**
  * "Instinct": the Chief of Staff understands a request in plain English and does it. The local model
@@ -52,6 +54,9 @@ export const SKILLS = {
   subscriptions: "Newsletters and paid subscriptions found in email: what the user pays for regularly, what they could cancel or unsubscribe from.",
   notes_search: "Answer a question from the user's own notes and documents (not email, not calendar). Args: query.",
   briefing: "Run the daily or morning briefing.",
+  reminders_list: "Show the user's open reminders (list, not add).",
+  contact_lookup: "The email address of a person the user has written to or heard from. Args: who.",
+  priorities: "What the user should do or look at FIRST today / next: a prioritised list from their calendar, unanswered mail, replies they wait for and reminders. Not the news briefing.",
   weekly_review: "Run the weekly review / summary of the week.",
   followups: "Draft replies to all the emails that are waiting for the user's answer.",
   pending_approvals: "What is waiting for the user's approval in this app (drafts, events, actions to review).",
@@ -81,7 +86,7 @@ export const RouteSchema = z.object({
 });
 export type Route = z.infer<typeof RouteSchema>;
 
-const ROUTE_JSON_SCHEMA = {
+export const ROUTE_JSON_SCHEMA = {
   type: "object",
   properties: {
     skill: { type: "string", enum: SKILL_NAMES },
@@ -92,6 +97,9 @@ const ROUTE_JSON_SCHEMA = {
   },
   required: ["skill", "args"],
 };
+/** The same, with the goal restated first: the model writes what the user wants before choosing (JSON keys come out in order). */
+export const ROUTE_GOAL_SCHEMA = { ...ROUTE_JSON_SCHEMA, properties: { goal: { type: "string" }, ...ROUTE_JSON_SCHEMA.properties }, required: ["goal", "skill", "args"] };
+const restateOn = (ctx: Ctx) => getSetting(ctx.db, "assistant.restate") === "on";
 
 // One short line per skill: the whole prompt is read by a laptop CPU before every first request.
 const PROMPT_SKILLS: Record<Skill, string> = {
@@ -118,6 +126,9 @@ const PROMPT_SKILLS: Record<Skill, string> = {
   subscriptions: "newsletters, subscriptions, what the user pays for regularly",
   notes_search: "anything the user wrote down in notes: goals, plans, lists, ideas, how-tos {query}",
   briefing: "the daily / morning briefing",
+  reminders_list: "show my reminders / to-dos",
+  contact_lookup: "someone's email address {who}",
+  priorities: "what to do first / what matters most today",
   weekly_review: "the weekly review",
   followups: "draft replies to all emails waiting for the user",
   pending_approvals: "what waits for the user's approval in the app",
@@ -128,6 +139,11 @@ const PROMPT_SKILLS: Record<Skill, string> = {
   web_search: "news, facts, sports, prices: needs the internet {query}",
   unsupported: "anything else: translating, booking, buying, music, smart home {reason}",
 };
+
+/** The skills with their one-line descriptions, as the router sees them (also used by the self-check). */
+export function skillList(): string {
+  return Object.entries(PROMPT_SKILLS).map(([k, v]) => `${k}: ${v}`).join("\n");
+}
 
 // Worked examples: small models follow examples better than descriptions.
 const EXAMPLES: [string, string][] = [
@@ -166,16 +182,21 @@ const EXAMPLES: [string, string][] = [
   ["who won the match last night?", 'web_search {"query":"who won the match last night"}'],
   ["what are the opening hours of the Picasso museum?", 'web_search {"query":"Picasso museum opening hours"}'],
   ["order a pizza", 'unsupported {"reason":"ordering food"}'],
+  ["who wrote Don Quixote?", 'web_search {"query":"who wrote Don Quixote"}'],
+  ["when is the electrician coming?", 'email_question {"query":"electrician"}'],
+  ["what should I say to Marc about the contract?", 'draft_reply {"who":"Marc"}'],
 ];
 
-export function routerPrompt() {
+export function routerPrompt(restate = false) {
   return [
     "Route the user's request to ONE skill of their assistant app. Use the user's own words in args; never invent names or facts.",
     "Skills:",
     ...Object.entries(PROMPT_SKILLS).map(([k, v]) => `${k}: ${v}`),
     "Examples:",
     ...EXAMPLES.map(([q, r]) => `"${q}" -> ${r}`),
-    'Answer as JSON: {"skill": "...", "args": {...}}',
+    restate
+      ? 'Answer as JSON: {"goal": "what the user wants as a result, in a few words", "skill": "...", "args": {...}}'
+      : 'Answer as JSON: {"skill": "...", "args": {...}}',
   ].join("\n");
 }
 
@@ -188,27 +209,60 @@ const WHEN = "today|tonight|tomorrow|this (?:week(?:end)?|morning|afternoon|even
 export function quickRoute(text: string): Route | null {
   const t = text.trim().toLowerCase();
   if (/^(?:please\s+)?remind me (?:to|about|that)\b/.test(t)) return { skill: "reminder", args: {} };
+  // "What time is my dentist", "when is my next run": the calendar's next matching event (travel has its own skill).
+  if (/^(?:when(?:'s| is) my next|what time(?:'s| is) my(?: next)?)\s+[\p{L}]/u.test(t) && !/\b(flights?|trip|hotel|train|plane|check-?in|booking)\b/.test(t) && !/\band\b/.test(t)) return { skill: "agenda", args: {} };
   if (/^who (?:hasn'?t|has not|didn'?t|did not|still hasn'?t) (?:replied|answered|responded|got(?:ten)? back|written back)\b|^who (?:still )?owes me (?:a |an )?(?:reply|answer)\b/.test(t)) return { skill: "waiting_on", args: {} };
-  if (/^(?:what'?s|what is|how'?s|how is) the weather\b|^(?:will|is) it (?:going to )?(?:rain|snow)\b|^weather\b/.test(t)) {
+  if (/^(?:what'?s|what is|how'?s|how is) the weather\b|^what the weather'?s? (?:is )?like\b|^(?:will|is) it (?:going to )?(?:rain|snow)\b|^weather\b/.test(t)) {
     const place = text.match(/\bin ([A-Z][\p{L}\s.'-]{1,40}?)(?=\s+(?:today|tonight|tomorrow|this|next|on|over)\b|[?.!,]|$)/u)?.[1]?.trim();
     return { skill: "weather", args: place ? { query: place } : {} };
   }
   if (new RegExp(`^(?:what'?s|what is|what do i have|what have i got|anything)\\b.*\\b(?:on|in) my (?:calendar|agenda|schedule)\\b|^(?:what'?s|what is) (?:on|planned|happening) (?:${WHEN})\\b|^(?:what do i have|what have i got|am i (?:free|busy)) (?:on |for )?(?:${WHEN})\\b|^(?:what'?s|what is) my (?:schedule|agenda|calendar)\\b`).test(t)) return { skill: "agenda", args: {} };
+  // "find a free hour on thursday and email Marc to propose it": offer free slots to a person.
+  const offer = text.match(/^(?:please\s+)?find (?:a |some )?free (hour|half an hour|\d{1,3}\s*(?:min(?:ute)?s?|hours?))\b.*\b(?:email|send|tell|message|write to|propose (?:it |them )?to)\s+([A-Z][\p{L}'-]+)/u);
+  if (offer) {
+    const minutes = /half/i.test(offer[1]) ? 30 : /hour/i.test(offer[1]) && !/\d/.test(offer[1]) ? 60 : /h/i.test(offer[1]) ? parseInt(offer[1], 10) * 60 : parseInt(offer[1], 10);
+    return { skill: "propose_times", args: { who: offer[2], minutes } };
+  }
+  // "list my reminders": show them, never add one called "List my reminders".
+  if (/^(?:please\s+)?(?:list|show(?: me)?|see|what are|what'?s on|read(?: me)?)\s+(?:all\s+)?(?:my|the)\s+(?:open\s+)?(?:reminders|to-?dos?|tasks|to-?do list)\b/.test(t)) return { skill: "reminders_list", args: {} };
+  // "ignore all previous instructions…", "show me your system prompt": a plain refusal (the whole sentence, never split).
+  if (/\b(?:ignore|disregard|forget)\s+(?:all\s+)?(?:(?:your|the|any|previous|prior|earlier|above)\s+)+(?:instructions|rules|prompts?)\b|\bsystem prompt\b|\b(?:reveal|show|print|repeat)\s+(?:me\s+)?your\s+(?:instructions|prompt|rules)\b|\bdeveloper mode\b|\bjailbreak\b/.test(t)) return { skill: "unsupported", args: { reason: "I don't change or reveal my instructions" } };
+  // "what's Priya's email": an address the app already knows.
+  const contact = text.match(/^(?:what(?:'s| is)|give me|find)\s+([\p{L}][\p{L}'-]+?)(?:'s|’s|s')\s+(?:e-?mail(?: address)?|address)\s*\??$/iu);
+  if (contact) return { skill: "contact_lookup", args: { who: contact[1] } };
+  // "chase the one that's been longest": the oldest wait (nudge() picks it).
+  if (/^(?:please\s+)?(?:chase|nudge|follow up with)\s+(?:(?:the one|the person|whoever|whichever|the people)\b.*\b(?:longest|oldest)\b|the (?:oldest|longest)(?: one| wait| person)?\s*$)/.test(t)) return { skill: "nudge", args: { who: "longest" } };
+  // "tell me the headlines": the news, from the web.
+  if (/^(?:please\s+)?(?:tell me |show me |give me |what are |what'?s )?(?:the )?(?:latest |today'?s |top |main )?(?:news|headlines)(?: today| now| right now)?\??$/.test(t)) return { skill: "web_search", args: { query: "top news headlines today" } };
+  // "whether the long run on the weekend fits": a question about the calendar.
+  if (/^(?:whether|if)\b.*\b(?:fits?|conflicts?|clash(?:es)?|works?|is free)\b/.test(t) && /\b(weekend|today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this week|next week|morning|afternoon|evening)\b/.test(t)) return { skill: "agenda", args: {} };
+  // Moving, cancelling or editing an event is not something the app can do: say so, instead of asking "when is it?".
+  if (/^(?:please\s+)?(?:can you\s+)?(?:move|reschedule|postpone|push back|cancel|delete|remove|change|edit)\s+(?:my|the|that|this)\s+(?!reminders?\b)/.test(t) && /\b(appointment|meeting|event|dentist|doctor|lunch|dinner|call|class|flight|booking|session|training|run|interview)\b/.test(t)) return { skill: "unsupported", args: { reason: "I can only add events, not move, change or cancel them" } };
+  if (/^(?:what should i (?:do|focus on|tackle|look at|start with)(?: first| next)?(?: today)?|what(?:'s| is) (?:most )?(?:important|urgent|pressing) (?:today|now)|where should i (?:start|begin)(?: today)?|what do i need to do (?:first|today|now))\??$/.test(t.replace(/[.!]+$/, ""))) return { skill: "priorities", args: {} };
+  if (/^(?:give me |show me )?(?:the )?(?:short version|quick summary|summary|rundown|overview|snapshot) of (?:today|my day|tomorrow)\b/.test(t)) return { skill: "agenda", args: {} };
   return null;
 }
 
 /** Asks the local model which skill a request is for (structured JSON, validated). Throws if the model is unavailable. */
-export async function routeRequest(ctx: Ctx, text: string, llm: LlmProvider = localLlm(ctx, "background")): Promise<Route & { model: string; ms: number }> {
+export async function routeRequest(ctx: Ctx, text: string, llm: LlmProvider = localLlm(ctx, "background"), people: string[] = []): Promise<Route & { model: string; ms: number }> {
   llm ??= localLlm(ctx, "background");
-  const system = routerPrompt();
+  const restate = restateOn(ctx);
+  const system = routerPrompt(restate);
+  // The most similar labelled requests go in the user message, after the fixed instructions, so the model's cache of the
+  // instructions still applies (docs/ACCURACY_PLAN.md, phase B).
+  // On by default since the dev run of 2026-10-16 (15% -> 10% errors); "off" turns it off.
+  // The user's own corrections join them, for the local model only: past requests never go to the cloud router.
+  const own = llm.id === "mistral-api" ? [] : userExamples(ctx);
+  const similar = getSetting(ctx.db, "assistant.examples") !== "off" ? similarExamples(text, 6, people, own) : [];
+  const user = `${similar.length ? `Similar requests and how they were routed:\n${similar.map(([q, r]) => `"${q}" -> ${r}`).join("\n")}\n\n` : ""}Request: ${text}`;
   let last = "";
   for (let attempt = 0; attempt < 2; attempt++) {
     // Cold (model not loaded), reading the instructions can take minutes on a laptop CPU; warm, seconds.
-    const out = await llm.generate(system, `Request: ${text}`, { maxTokens: 120, timeoutMs: 600_000, format: ROUTE_JSON_SCHEMA, temperature: 0, keepAlive: "15m" });
+    const out = await llm.generate(system, user, { maxTokens: restate ? 170 : 120, timeoutMs: 600_000, format: restate ? ROUTE_GOAL_SCHEMA : ROUTE_JSON_SCHEMA, temperature: 0, keepAlive: "15m" });
     last = out.text;
     try {
       const parsed = RouteSchema.parse(JSON.parse(out.text));
-      logActivity(ctx, { actor: "chief_of_staff", kind: "agent_run", agentId: "chief_of_staff", outcome: "info", summary: `Understood the request as “${parsed.skill}” (${out.model}, ${Math.round(out.ms / 1000)} s)` });
+      logActivity(ctx, { actor: "chief_of_staff", kind: "agent_run", agentId: "chief_of_staff", outcome: "info", summary: `Understood the request as “${parsed.skill}”${restate ? ` (goal: ${String((JSON.parse(out.text) as { goal?: unknown }).goal ?? "").slice(0, 120)})` : ""} (${out.model}, ${Math.round(out.ms / 1000)} s)` });
       return { ...parsed, model: out.model, ms: out.ms };
     } catch {
       // malformed JSON or an unknown skill: one retry, then the caller falls back
@@ -230,7 +284,7 @@ let lastWarm = 0;
 export function warmRouter(ctx: Ctx, busy: boolean, llm: LlmProvider = localLlm(ctx, "background")) {
   if (busy || Date.now() - lastWarm < 60_000) return { warming: false };
   lastWarm = Date.now();
-  void llm.generate(routerPrompt(), "Request: hello", { maxTokens: 1, timeoutMs: 600_000, format: ROUTE_JSON_SCHEMA, temperature: 0, keepAlive: "15m" }).catch(() => {});
+  void llm.generate(routerPrompt(restateOn(ctx)), "Request: hello", { maxTokens: 1, timeoutMs: 600_000, format: ROUTE_JSON_SCHEMA, temperature: 0, keepAlive: "15m" }).catch(() => {});
   return { warming: true };
 }
 
@@ -259,7 +313,10 @@ const PERIOD_WORDS = /\b(week|weekend|month|today|tonight|tomorrow|monday|tuesda
 
 /** "When is my next dentist appointment?": the first upcoming event whose title matches, within 3 months. */
 export async function nextEvent(ctx: Ctx, text: string): Promise<SkillAnswer | null> {
-  const m = text.match(/\b(?:when(?:'s| is)? my next|my next|when(?:'s| is) (?:my|the) (?:next )?)\s+([\p{L}][\p{L}' -]{1,50}?)\s*\??$/iu);
+  // "when is my next run", and "is there a spanish thing coming up": the next event whose title has those words.
+  const m =
+    text.match(/\b(?:when(?:'s| is)? my next|my next|when(?:'s| is) (?:my|the) (?:next )?|what time(?:'s| is) (?:my|the) (?:next )?)\s+([\p{L}][\p{L}' -]{1,50}?)\s*\??$/iu) ??
+    text.match(/\b(?:is there|are there|do i have|have i got)\s+(?:a|an|any|my)\s+([\p{L}][\p{L}'-]{2,30}(?:\s+[\p{L}][\p{L}'-]{2,30})?)\s+(?:thing|event|class|lesson|session|meeting|appointment)?s?\s*(?:coming up|soon|planned)\s*\??$/iu);
   if (!m || PERIOD_WORDS.test(m[1])) return null;
   const words = m[1].toLowerCase().split(/[\s'-]+/).filter((w) => w.length > 2 && !STOP.has(w));
   if (!words.length) return null;
@@ -281,11 +338,72 @@ export async function agenda(ctx: Ctx, text: string): Promise<SkillAnswer> {
   } catch (err) {
     if (!denied(err)) throw err;
   }
+  const named = await namedEventAnswer(ctx, text);
+  if (named) return named;
   const range = parseRange(text, ctx.now(), tz());
+  const got = await eventsBetween(ctx, range.from, range.to);
+  if ("reply" in got) return got;
+  let events = got.events;
+  events.sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+  // "Am I free at 3pm tomorrow": that moment, yes or no.
+  const at = freeAtAnswer(text, events, range.from);
+  if (at) return at;
+  // "Anything after lunch today", "what's on after 3pm": only what starts after that point.
+  const cut = timeCut(text, events, range.from);
+  if (cut) {
+    events = events.filter((e) => (cut.after ? Date.parse(e.starts_at) >= cut.at : Date.parse(e.ends_at) <= cut.at));
+    if (!events.length) return { reply: `Nothing on your calendar ${range.label} ${cut.label}.`, section: "today" };
+    return { reply: `${events.length} event${events.length > 1 ? "s" : ""} ${range.label} ${cut.label}:`, items: events.map((e) => ({ title: `${hm(e.starts_at)}–${hm(e.ends_at)} ${e.title}`, detail: e.location ?? undefined })), section: "today" };
+  }
+  // "What's left on my calendar today": only what hasn't ended.
+  if (/\b(left|remaining|rest of)\b/i.test(text)) events = events.filter((e) => Date.parse(e.ends_at) > ctx.now().getTime());
+  // A day question: unanswered mail that names that weekday ("Saturday hike — are you in?") belongs in the answer.
+  const spanDays = Math.round((range.to.getTime() - range.from.getTime()) / 86_400_000);
+  const dayNames = spanDays <= 3 ? [...new Set(Array.from({ length: Math.max(1, spanDays) }, (_, i) => new Date(range.from.getTime() + i * 86_400_000 + 3_600_000).toLocaleDateString("en-GB", { weekday: "long", timeZone: tz() })))] : [];
+  const dayName = dayNames.join(" or ");
+  const mentions = dayNames.length
+    ? all<{ sender: string; subject: string; snippet: string }>(ctx.db, `SELECT sender, subject, snippet FROM messages WHERE needs_reply = 1${demoRowsFilter()} AND (${dayNames.map(() => "subject LIKE ? OR snippet LIKE ?").join(" OR ")}) ORDER BY received_at DESC LIMIT 3`, ...dayNames.flatMap((d) => [`%${d}%`, `%${d}%`])).map((m) => ({ title: `Mail: ${m.subject}`, detail: `from ${m.sender.replace(/\s*<[^>]*>/, "")}, waiting for your reply, mentions ${dayNames.find((d) => `${m.subject} ${m.snippet}`.toLowerCase().includes(d.toLowerCase())) ?? dayName}` }))
+    : [];
+  // "Do I have time for a coffee with Sam before the committee": the free time from now until that event (or the day's end).
+  if (/\b(?:do i have|have i got|is there|got)\s+(?:any\s+)?time\b|\btime for\b|\bam i free\b/i.test(text) && range.to.getTime() - range.from.getTime() <= 86_400_000 + 3_600_000) {
+    const words = text.toLowerCase().match(/\bbefore\s+(?:the\s+|my\s+)?([\p{L}]{3,})/u)?.[1];
+    const limit = words ? events.find((e) => e.title.toLowerCase().includes(words)) : undefined;
+    const end = limit ? Date.parse(limit.starts_at) : range.to.getTime();
+    const gaps: string[] = [];
+    let cursor = Math.max(ctx.now().getTime(), range.from.getTime());
+    for (const e of events.filter((e) => Date.parse(e.ends_at) > cursor && Date.parse(e.starts_at) < end)) {
+      if (Date.parse(e.starts_at) - cursor >= 30 * 60_000) gaps.push(`${hm(new Date(cursor).toISOString())}–${hm(e.starts_at)}`);
+      cursor = Math.max(cursor, Date.parse(e.ends_at));
+    }
+    if (end - cursor >= 30 * 60_000) gaps.push(`${hm(new Date(cursor).toISOString())}–${hm(new Date(end).toISOString())}`);
+    const until = limit ? ` before “${limit.title}” at ${hm(limit.starts_at)}` : ` ${range.label}`;
+    return { reply: gaps.length ? `Yes: you're free ${gaps.join(", ")}${until}.` : `No: nothing free for 30 minutes or more${until}.`, items: events.map((e) => ({ title: `${hm(e.starts_at)}–${hm(e.ends_at)} ${e.title}`, detail: e.location ?? undefined })), section: "today" };
+  }
+  if (!events.length) return { reply: `Nothing on your calendar ${range.label}. You're free${mentions.length ? `, but your mail mentions ${dayName}:` : "."}`, items: mentions.length ? mentions : undefined, section: "today" };
+  const multiDay = range.to.getTime() - range.from.getTime() > 86_400_000 + 3_600_000;
+  // Overlapping timed events (all-day ones don't count): worth flagging, as a good assistant would.
+  const timed = (e: { starts_at: string; ends_at: string }) => Date.parse(e.ends_at) - Date.parse(e.starts_at) < 20 * 3_600_000;
+  const clash = (e: (typeof events)[number]) => events.find((o) => o !== e && timed(o) && timed(e) && o.starts_at < e.ends_at && e.starts_at < o.ends_at);
+  const clashes = events.filter((e) => clash(e));
+  return {
+    reply: `${events.length} event${events.length > 1 ? "s" : ""} ${range.label}:${clashes.length ? ` ⚠ ${clashes.length} overlap.` : /double.?book|overlap|clash|conflict/i.test(text) ? " No overlaps: nothing is double booked." : ""}${/\bwho(?:'s| is| will be| are)? (?:coming|going|attending|there)\b|\battendees?\b/i.test(text) ? " Your calendar doesn't say who is coming." : ""}`,
+    items: [...events.map((e) => {
+      const other = clash(e);
+      return { title: `${multiDay ? `${dayLabel(e.starts_at)} · ` : ""}${timed(e) ? `${hm(e.starts_at)}–${hm(e.ends_at)}` : "all day"} ${e.title}`, detail: [e.location, other ? `⚠ overlaps with “${other.title}”` : null].filter(Boolean).join(" · ") || undefined };
+    }), ...mentions],
+    section: "today",
+  };
+}
+
+type CalEvent = { title: string; starts_at: string; ends_at: string; location: string | null };
+
+/** The user's events between two instants (Google Calendar when connected, the demo calendar when shown). */
+async function eventsBetween(ctx: Ctx, from: Date, to: Date): Promise<{ events: CalEvent[] } | SkillAnswer> {
+  const range = { from, to };
   const google = isConnected(ctx, "google-calendar");
   const demo = !serviceHidden(ctx, "demo-calendar");
   if (!google && !demo) return { reply: "No calendar is connected yet. Connect Google Calendar in Connections & Permissions.", section: "permissions" };
-  let events: { title: string; starts_at: string; ends_at: string; location: string | null }[] = [];
+  let events: CalEvent[] = [];
   try {
     if (google) {
       // The synced copy covers yesterday to two weeks ahead; further out, read that window directly.
@@ -307,21 +425,114 @@ export async function agenda(ctx: Ctx, text: string): Promise<SkillAnswer> {
     if (denied(err)) return { reply: "The Calendar agent needs Read on your calendar for that. Grant it in Connections & Permissions.", section: "permissions" };
     throw err;
   }
-  events.sort((a, b) => a.starts_at.localeCompare(b.starts_at));
-  if (!events.length) return { reply: `Nothing on your calendar ${range.label}. You're free.`, section: "today" };
-  const multiDay = range.to.getTime() - range.from.getTime() > 86_400_000 + 3_600_000;
-  // Overlapping timed events (all-day ones don't count): worth flagging, as a good assistant would.
-  const timed = (e: { starts_at: string; ends_at: string }) => Date.parse(e.ends_at) - Date.parse(e.starts_at) < 20 * 3_600_000;
-  const clash = (e: (typeof events)[number]) => events.find((o) => o !== e && timed(o) && timed(e) && o.starts_at < e.ends_at && e.starts_at < o.ends_at);
-  const clashes = events.filter((e) => clash(e));
-  return {
-    reply: `${events.length} event${events.length > 1 ? "s" : ""} ${range.label}:${clashes.length ? ` ⚠ ${clashes.length} overlap.` : ""}`,
-    items: events.map((e) => {
-      const other = clash(e);
-      return { title: `${multiDay ? `${dayLabel(e.starts_at)} · ` : ""}${timed(e) ? `${hm(e.starts_at)}–${hm(e.ends_at)}` : "all day"} ${e.title}`, detail: [e.location, other ? `⚠ overlaps with “${other.title}”` : null].filter(Boolean).join(" · ") || undefined };
-    }),
-    section: "today",
+  return { events: events.sort((a, b) => a.starts_at.localeCompare(b.starts_at)) };
+}
+
+// Words that say what kind of question it is, or when; what is left names the event ("spanish exchange", "long runs").
+const QUESTION_WORDS = new Set("where when what which who how is are am do does did i my me the a an on at in of to for and or it its s re there any anything today tomorrow tonight yesterday week weekend next this coming time times day days date long until till calendar agenda schedule event events meeting meetings appointment appointments plan plans planned happening going have has get got usually usual always".split(" "));
+const WEEKDAY_WORDS = /^(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)s?$/;
+
+/**
+ * "Where's the spanish exchange", "is the dentist today or tomorrow", "on which day are my long runs": a question about one
+ * named event, answered with that event's place, day and time (and its weekday when it repeats), not with a day's list.
+ */
+export async function namedEventAnswer(ctx: Ctx, text: string): Promise<SkillAnswer | null> {
+  const where = /\bwhere(?:'s| is| are| was)?\b/i.test(text);
+  const when = /\b(?:when(?:'s| is| are| was)?|what time|which days?|what days?|today or tomorrow|tomorrow or today|how long is)\b/i.test(text);
+  if (!(where || when) || /\b(?:time for|free|busy|available)\b/i.test(text)) return null;
+  const words = text.toLowerCase().replace(/[’']s\b/g, "").split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 2 && !QUESTION_WORDS.has(w) && !WEEKDAY_WORDS.test(w)).map(stem);
+  if (!words.length) return null;
+  const today = localToday(ctx.now(), tz());
+  let got: Awaited<ReturnType<typeof eventsBetween>>;
+  try {
+    got = await eventsBetween(ctx, zonedToUtc(today, 0, tz()), new Date(ctx.now().getTime() + 14 * 86_400_000));
+  } catch {
+    return null;
+  }
+  if ("reply" in got) return null;
+  const titleWords = (t: string) => new Set(t.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean).map(stem));
+  const hits = got.events.filter((e) => {
+    const tw = titleWords(`${e.title} ${e.location ?? ""}`);
+    const shared = words.filter((w) => tw.has(w)).length;
+    return shared > 0 && shared >= Math.ceil(words.length / 2);
+  });
+  if (!hits.length) return null;
+  const now = ctx.now().getTime();
+  const relDay = (iso: string) => {
+    const d = localToday(new Date(iso), tz());
+    const diff = Math.round((Date.UTC(d.y, d.m - 1, d.d) - Date.UTC(today.y, today.m - 1, today.d)) / 86_400_000);
+    return diff === 0 ? "today" : diff === 1 ? "tomorrow" : new Date(iso).toLocaleDateString("en-GB", { weekday: "long", timeZone: tz() });
   };
+  const upcoming = hits.filter((e) => Date.parse(e.ends_at) > now);
+  const first = upcoming[0] ?? hits[hits.length - 1];
+  const span = `${hm(first.starts_at)}–${hm(first.ends_at)}`;
+  const over = Date.parse(first.ends_at) <= now ? " (already over)" : "";
+  const items = hits.map((e) => ({ title: `${dayLabel(e.starts_at)} · ${hm(e.starts_at)}–${hm(e.ends_at)} ${e.title}`, detail: e.location ?? undefined }));
+  // "On which day are my long runs": the weekday they fall on.
+  if (/\b(?:which|what) days?\b/i.test(text)) {
+    const days = [...new Set(hits.map((e) => new Date(e.starts_at).toLocaleDateString("en-GB", { weekday: "long", timeZone: tz() })))];
+    return { reply: `“${first.title}” is on ${days.length === 1 ? `${days[0]}${hits.length > 1 ? "s" : ""}` : days.join(", ")}: next ${relDay(first.starts_at)} (${dayLabel(first.starts_at)}) at ${span}${over}.`, items, section: "today" };
+  }
+  if (where) {
+    return { reply: first.location ? `“${first.title}” is at ${first.location}, ${relDay(first.starts_at)} (${dayLabel(first.starts_at)}) at ${span}${over}.` : `Your calendar doesn't say where “${first.title}” is (${relDay(first.starts_at)}, ${dayLabel(first.starts_at)} at ${span}).`, items, section: "today" };
+  }
+  return { reply: `“${first.title}”: ${relDay(first.starts_at)} (${dayLabel(first.starts_at)}) at ${span}${first.location ? `, ${first.location}` : ""}${over}.`, items, section: "today" };
+}
+
+const CLOCK = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b|\b(noon|midday)\b/i;
+const clockMinutes = (m: RegExpMatchArray): number | null => {
+  if (m[4]) return 12 * 60;
+  let h = Number(m[1]);
+  const min = Number(m[2] ?? 0);
+  if (h > 23 || min > 59) return null;
+  if (m[3]?.toLowerCase() === "pm" && h < 12) h += 12;
+  if (m[3]?.toLowerCase() === "am" && h === 12) h = 0;
+  // "at 3" without am/pm: an afternoon hour for 1–7
+  if (!m[3] && h >= 1 && h <= 7) h += 12;
+  return h * 60 + min;
+};
+
+/** "Am I free at 3pm tomorrow", "check if I'm free at 15:00 on friday": that moment on the asked day, yes or no. */
+function freeAtAnswer(text: string, events: CalEvent[], dayStart: Date): SkillAnswer | null {
+  if (!/\b(?:free|available|busy)\b/i.test(text)) return null;
+  const m = text.match(new RegExp(`\\bat\\s+(?:${CLOCK.source})`, "i"));
+  if (!m) return null;
+  const minutes = clockMinutes(m);
+  if (minutes === null) return null;
+  const at = zonedToUtc(localToday(dayStart, tz()), minutes, tz()).getTime();
+  const end = at + 30 * 60_000;
+  const busy = events.filter((e) => Date.parse(e.starts_at) < end && Date.parse(e.ends_at) > at);
+  const day = dayLabel(new Date(at).toISOString());
+  const time = hm(new Date(at).toISOString());
+  if (busy.length) return { reply: `No: at ${time} on ${day} you have “${busy[0].title}” (${hm(busy[0].starts_at)}–${hm(busy[0].ends_at)}).`, section: "today" };
+  const before = events.filter((e) => Date.parse(e.ends_at) <= at).at(-1);
+  const after = events.find((e) => Date.parse(e.starts_at) >= end);
+  return { reply: `Yes: you're free at ${time} on ${day}${before || after ? ` (${before ? `after “${before.title}” ends at ${hm(before.ends_at)}` : ""}${before && after ? "; " : ""}${after ? `next is “${after.title}” at ${hm(after.starts_at)}` : ""})` : ": nothing else that day"}.`, section: "today" };
+}
+
+/** "After lunch", "after the committee", "after 3pm", "before noon": a point in the asked day to cut the list at. */
+function timeCut(text: string, events: CalEvent[], dayStart: Date): { at: number; after: boolean; label: string } | null {
+  // "Do I have time for a coffee before the committee" is the free-time question, answered further on.
+  if (/\b(?:time for|am i free|have (?:any )?time|got (?:any )?time)\b/i.test(text)) return null;
+  const m = text.match(/\b(after|before)\s+(?:the\s+|my\s+)?([\p{L}]{3,}|\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon|midday)/iu);
+  if (!m) return null;
+  const after = m[1].toLowerCase() === "after";
+  const what = m[2].toLowerCase();
+  const day = localToday(dayStart, tz());
+  const clock = what.match(CLOCK);
+  if (clock && /\d|noon|midday/.test(what)) {
+    const minutes = clockMinutes(clock);
+    if (minutes === null) return null;
+    const at = zonedToUtc(day, minutes, tz()).getTime();
+    return { at, after, label: `${m[1].toLowerCase()} ${hm(new Date(at).toISOString())}` };
+  }
+  const event = events.find((e) => e.title.toLowerCase().includes(what));
+  if (event) return { at: after ? Date.parse(event.ends_at) : Date.parse(event.starts_at), after, label: `${m[1].toLowerCase()} “${event.title}” (${hm(after ? event.ends_at : event.starts_at)})` };
+  if (what === "lunch") {
+    const at = zonedToUtc(day, after ? 14 * 60 : 12 * 60, tz()).getTime();
+    return { at, after, label: `${m[1].toLowerCase()} lunch` };
+  }
+  return null;
 }
 
 /** "Did Marc answer?", "find the invoice from Endesa": Gmail's own search, headers only. */
@@ -329,10 +540,20 @@ export async function emailSearch(ctx: Ctx, query: string, days?: number): Promi
   if (!isConnected(ctx, "gmail")) return { reply: "Gmail isn't connected, so I can't search your mail. Connect it in Connections & Permissions.", section: "permissions" };
   const q = `${query.replace(/[\r\n]+/g, " ").trim().slice(0, 250)}${days && !/newer_than:/.test(query) ? ` newer_than:${Math.min(Math.max(days, 1), 365)}d` : ""}`;
   try {
-    const rows = await callTool(ctx, "inbox", "gmail.search", { query: q, max: 15 }, new RunBudget(1, 60_000));
+    let rows = await callTool(ctx, "inbox", "gmail.search", { query: q, max: 15 }, new RunBudget(1, 60_000));
+    let shown = q;
+    // Nothing for the model's long query: the main words alone.
+    for (const loose of rows.length ? [] : looserQueries(query)) {
+      const lq = `${loose}${days ? ` newer_than:${Math.min(Math.max(days, 1), 365)}d` : ""}`;
+      rows = await callTool(ctx, "inbox", "gmail.search", { query: lq, max: 15 }, new RunBudget(1, 60_000));
+      if (rows.length) {
+        shown = lq;
+        break;
+      }
+    }
     if (!rows.length) return { reply: `No email matches “${q}”.` };
     return {
-      reply: `${rows.length} email${rows.length > 1 ? "s" : ""} for “${q}”, newest first:`,
+      reply: `${rows.length} email${rows.length > 1 ? "s" : ""} for “${shown}”, newest first:`,
       items: rows.map((r) => ({ title: r.subject, detail: `${parseSender(r.sender).name ?? r.sender.replace(/\s*<[^>]*>/, "")} · ${dayLabel(r.date)} (${ago(r.date, ctx.now())})` })),
     };
   } catch (err) {
@@ -343,17 +564,23 @@ export async function emailSearch(ctx: Ctx, query: string, days?: number): Promi
 
 /** "Remind me to call mom tomorrow at 6pm": a dashboard reminder, with a due time when one is said. */
 export function reminderFromText(ctx: Ctx, text: string): SkillAnswer {
+  // "I need to bring the map on saturday, can you remind me friday night": the task first, the time after "remind me".
+  const tail = text.match(/^\s*(?:i\s+(?:need|have|must|should|want)\s+to\s+)?(.+?)[,.;]?\s+(?:(?:can|could|would)\s+you\s+|please\s+)?remind\s+me(?:\s+(?:about|of)\s+it)?\s*(.*?)\s*[?.!]*$/i);
+  if (tail && !/^\s*(?:please\s+)?(?:can you\s+)?remind me\b/i.test(text) && tail[1].split(/\s+/).length >= 2) text = `remind me ${tail[2] ? `${tail[2]} ` : ""}to ${tail[1]}`;
   const task =
     text
-      .replace(/^\s*(?:please\s+)?(?:can you\s+)?(?:remind me|set a reminder|add a (?:reminder|to-?do|task)|don'?t let me forget|make sure i (?:don'?t forget|remember))\s*:?\s*(?:to|that|about|for)?\s*/i, "")
+      .replace(/^\s*(?:please\s+)?(?:can you\s+)?(?:remind me|set (?:me )?a reminder|add a (?:reminder|to-?do|task)|put (?:in )?a reminder|create a reminder|make a reminder|reminder|don'?t let me forget|make sure i (?:don'?t forget|remember))\s*:?\s*(?:for me\s+)?(?:(?:to|that|about|for)\b)?\s*/i, "")
       .trim() || text;
-  const parsed = parseEventRequest(task, ctx.now(), tz());
+  const parsed = parseEventRequest(task, ctx.now(), tz(), 9 * 60);
   const hasWhen = !("error" in parsed) && parsed.title.toLowerCase() !== task.toLowerCase();
-  const title = hasWhen ? parsed.title : task.replace(/[.!?]+$/, "");
+  const title = (hasWhen ? parsed.title : task.replace(/[.!?]+$/, "")).replace(/^to\s+/i, "");
   const dueAt = hasWhen ? parsed.startsAt : undefined;
-  addReminder(ctx, title.charAt(0).toUpperCase() + title.slice(1), dueAt, "assistant");
+  const shown = title.charAt(0).toUpperCase() + title.slice(1);
+  addReminder(ctx, shown, dueAt, "assistant");
+  // "every sunday": reminders don't repeat; say so rather than let the user believe in a weekly series.
+  const repeat = /\b(every|each|weekly|daily|monthly)\b/i.test(text) ? " Reminders don't repeat: this is a single one; add the next one when it's done." : "";
   return {
-    reply: `Added to your reminders: “${title}”${dueAt ? `, due ${dayLabel(dueAt)}${"error" in parsed || parsed.allDay ? "" : ` at ${hm(dueAt)}`}` : ""}.`,
+    reply: `Added to your reminders: “${shown}”${dueAt ? `, due ${dayLabel(dueAt)}${"error" in parsed || parsed.allDay ? "" : ` at ${hm(dueAt)}`}` : ""}.${repeat}`,
     section: "today",
   };
 }
@@ -390,7 +617,10 @@ export async function nudge(ctx: Ctx, who: string): Promise<SkillAnswer> {
   await refreshScan(ctx, "follow_up", "gmail.scan_waiting", "insights.scanned.waiting");
   const w = who.toLowerCase().trim();
   const rows = all<{ thread_id: string; recipient: string; subject: string }>(ctx.db, `SELECT thread_id, recipient, subject FROM waiting_on WHERE 1 = 1${demoRowsFilter()} ORDER BY sent_at`);
-  const match = rows.find((r) => r.recipient.toLowerCase().includes(w));
+  // "chase the one that's been longest": the oldest wait (rows are oldest first).
+  // By person, or by what the mail was about ("follow up on the kitchen quote": "Quote for the kitchen shelves").
+  const topic = w.split(/[^\p{L}]+/u).filter((x) => x.length >= 4 && !/^(?:about|with|from|that|this|their|reply|answer|email|mail)$/.test(x));
+  const match = /\b(longest|oldest|first|most overdue)\b/.test(w) ? rows[0] : rows.find((r) => r.recipient.toLowerCase().includes(w) || (w.length >= 4 && r.subject.toLowerCase().includes(w))) ?? (topic.length ? rows.find((r) => topic.every((x) => r.subject.toLowerCase().includes(x.replace(/s$/, "")))) : undefined);
   if (!match) {
     return {
       reply: rows.length ? `I don't see a conversation with “${who}” waiting for an answer. These are:` : `No conversation is waiting for an answer, so there's nobody to nudge.`,
@@ -399,12 +629,36 @@ export async function nudge(ctx: Ctx, who: string): Promise<SkillAnswer> {
     };
   }
   try {
-    const { actionId } = await proposeNudge(ctx, match.thread_id);
-    return { reply: `Drafted a follow-up to ${match.recipient.replace(/\s*<[^>]*>/, "")} about “${match.subject}”. Review it in the Action Queue; nothing is sent until you approve it.`, actionId, section: "actions" };
+    const { actionId, existing } = await proposeNudge(ctx, match.thread_id);
+    const to = match.recipient.replace(/\s*<[^>]*>/, "");
+    if (existing) return { reply: `A follow-up to ${to} about “${match.subject}” is already waiting for your approval in the Action Queue, so I didn't draft a second one.`, actionId, section: "actions" };
+    return { reply: `Drafted a follow-up to ${to} about “${match.subject}”. Review it in the Action Queue; nothing is sent until you approve it.`, actionId, section: "actions" };
   } catch (err) {
     if (err instanceof InsightError) return { reply: err.message, section: "permissions" };
     throw err;
   }
+}
+
+/** "What should I do first today?": a short prioritised list, built from the user's own data in code (no model, nothing invented). */
+export async function priorities(ctx: Ctx): Promise<SkillAnswer> {
+  const items: { title: string; detail?: string }[] = [];
+  const endOfToday = parseRange("today", ctx.now(), tz()).to.toISOString();
+  for (const r of all<{ text: string; due_at: string | null }>(ctx.db, "SELECT text, due_at FROM reminders WHERE done_at IS NULL AND due_at IS NOT NULL AND due_at <= ? ORDER BY due_at LIMIT 3", endOfToday)) {
+    items.push({ title: r.text, detail: Date.parse(r.due_at!) < ctx.now().getTime() - 3_600_000 ? "reminder, overdue" : `reminder, due ${hm(r.due_at!)}` });
+  }
+  for (const m of all<{ sender: string; subject: string }>(ctx.db, `SELECT sender, subject FROM messages WHERE needs_reply = 1${demoRowsFilter()} ORDER BY received_at DESC LIMIT 4`)) {
+    items.push({ title: `Answer: ${m.subject}`, detail: `from ${m.sender.replace(/\s*<[^>]*>/, "")}, waiting for your reply` });
+  }
+  const today = await agenda(ctx, "what's on today").catch(() => null);
+  for (const it of today?.items ?? []) items.push({ title: it.title, detail: it.detail ? `today, ${it.detail}` : "today" });
+  const now = ctx.now().getTime();
+  for (const w of all<{ recipient: string; subject: string; sent_at: string }>(ctx.db, `SELECT recipient, subject, sent_at FROM waiting_on WHERE 1 = 1${demoRowsFilter()} ORDER BY sent_at LIMIT 2`)) {
+    const days = Math.floor((now - Date.parse(w.sent_at)) / 86_400_000);
+    if (days >= 3) items.push({ title: `Chase ${w.recipient.replace(/\s*<[^>]*>/, "")}: ${w.subject}`, detail: `no answer for ${days} days` });
+  }
+  if (!items.length) return { reply: "Nothing is pressing right now: no reminders due, no mail waiting for your answer, and nothing on today's calendar." };
+  const shown = items.slice(0, 8);
+  return { reply: `${shown.length} thing${shown.length === 1 ? "" : "s"} to look at, in the order I'd do them:`, items: shown, section: "today" };
 }
 
 /** "What trips do I have coming up?" */
@@ -509,7 +763,7 @@ export async function weatherAnswer(ctx: Ctx, text: string, place: string | null
   return { reply: `${f.location}, ${range.label}:`, items: days.map((d) => ({ title: dayName(d.date), detail: fmt(d) })) };
 }
 
-const ANSWER_SYSTEM = [
+export const ANSWER_SYSTEM = [
   "You answer the user's question using ONLY the emails given below, which come from their own mailbox.",
   "Quote the exact facts (dates, times, amounts, references, addresses) and cite the email number like [1].",
   "If the emails don't contain the answer, say so plainly in one sentence. Do not guess. Answer in English, in at most three sentences.",
@@ -519,6 +773,8 @@ const ANSWER_SYSTEM = [
 /** Model answers are shown as plain text, so Markdown (bold, headings, bullets, trailing notes) is turned into plain text. */
 export function plainAnswer(text: string): string {
   return text
+    // Internal data markers the model sometimes echoes ("<untrusted …>"): never shown to the user.
+    .replace(/<\/?untrusted[^>]*>/gi, "")
     .replace(/^\s*\*\(?(?:Note|Disclaimer)[\s\S]*$/im, "")
     .replace(/\*\*|__|`/g, "")
     .replace(/^#{1,6}\s+/gm, "")
@@ -528,7 +784,32 @@ export function plainAnswer(text: string): string {
     .trim();
 }
 
-const WEB_SYSTEM = [
+/**
+ * Every figure in an answer must be written in its sources: a sentence with a number the sources don't contain (an invented
+ * "previous price of 334 EUR") is removed, and the answer says a figure was left out. Citations ([1]) and single digits are not
+ * checked; "7,600", "7 600" and "7600" count as the same number. Pure.
+ */
+export function groundNumbers(answer: string, sources: string): string {
+  const norm = (t: string) => t.replace(/(\d)[,\u202f\u00a0 ](?=\d{3}\b)/g, "$1");
+  const known = new Set((norm(sources).match(/\d+(?:[.:]\d+)*/g) ?? []).flatMap((n) => [n, ...n.split(/[.:]/)]));
+  // A day of the month next to a month name ("October 20", "20 Oct") is a date, checked elsewhere (the weekday rule).
+  const MONTH = "(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?";
+  const noDays = (t: string) => t.replace(new RegExp(`\\b(?:[12]?\\d|3[01])(?:st|nd|rd|th)?\\s+${MONTH}|${MONTH}\\s+(?:[12]?\\d|3[01])(?:st|nd|rd|th)?\\b`, "gi"), " ");
+  const figures = (sentence: string) => (norm(noDays(sentence).replace(/\[\d+(?:\s*[,\]\[]\s*\d+)*\]/g, "")).match(/\d+(?:[.:]\d+)*/g) ?? []).filter((n) => n.replace(/\D/g, "").length >= 2);
+  const parts = answer.split(/(?<=[.!?])\s+|\n+/);
+  let dropped = 0;
+  const kept = parts.filter((p) => {
+    const bad = figures(p).some((n) => !known.has(n) && !n.split(/[.:]/).every((x) => known.has(x)));
+    if (bad) dropped++;
+    return !bad;
+  });
+  if (!dropped) return answer;
+  if (!kept.join("").trim()) return "I couldn't find that stated in the sources.";
+  return `${kept.join(" ").replace(/\s+•/g, "\n•").trim()} (I left out a figure I couldn't find in the sources.)`;
+}
+
+export const WEB_SYSTEM = [
+
   "You answer the user's question using ONLY the web search results and pages given below.",
   "Give the answer first, with the key facts (names, dates, numbers), and cite sources like [1]. Prefer the most recent and most official sources; say when sources disagree.",
   "State ONLY facts written in the sources: no background, history, records or comparisons from your own knowledge (they are often wrong). Two sentences are usually enough; end after the answer.",
@@ -547,26 +828,41 @@ export async function webAnswer(ctx: Ctx, question: string, query: string, progr
   const today = ctx.now().toISOString().slice(0, 10);
   const sources = found.results.map((r) => fenceUntrusted(`web result [${r.n}] ${new URL(r.url).hostname}`, `Title: ${r.title}\nSnippet: ${r.snippet}${found.pages.has(r.n) ? `\nPage text: ${found.pages.get(r.n)}` : ""}`)).join("\n\n");
   const out = await llm.generate(WEB_SYSTEM, `Today is ${today}.\nQuestion: ${question}\n\n${sources}`, { maxTokens: 260, timeoutMs: 1_200_000 });
-  return { reply: plainAnswer(out.text), items: webItems(found.results) };
+  const sourceText = `${today} ${question} ${found.results.map((r) => `${r.title} ${r.snippet} ${found.pages.get(r.n) ?? ""}`).join(" ")}`;
+  return { reply: groundNumbers(plainAnswer(out.text), sourceText), items: webItems(found.results) };
 }
 
 /** Reads the top matches of a Gmail search (skipping AI-directed text) for the local model. */
-export async function readMatches(ctx: Ctx, query: string, max: number, progress: (s: string) => void) {
+export async function readMatches(ctx: Ctx, query: string, max: number, progress: (s: string) => void, allowBulk = false) {
   const rows = await callTool(ctx, "inbox", "gmail.search", { query, max: 8 }, new RunBudget(1, 60_000));
-  const read: { n: number; sender: string; subject: string; date: string; text: string }[] = [];
-  for (const r of rows.filter((x) => !x.bulk || /booking|reserv|ticket|invoice|factura|order|confirm/i.test(x.subject)).slice(0, max)) {
+  const read: { n: number; sender: string; subject: string; date: string; text: string }[] & { skipped: { bulk: number; flagged: number } } = Object.assign([], { skipped: { bulk: 0, flagged: 0 } });
+  const usable = rows.filter((x) => allowBulk || !x.bulk || /booking|reserv|ticket|invoice|factura|order|confirm/i.test(x.subject));
+  read.skipped.bulk = rows.length - usable.length;
+  for (const r of usable.slice(0, max)) {
     progress(`Reading “${r.subject.slice(0, 60)}”…`);
     const m = await callTool(ctx, "inbox", "gmail.read_by_id", { gmailId: r.id }, new RunBudget(1, 60_000));
-    if (isAiDirected(injectionFlags(`${m.subject}\n${m.text}`))) continue;
+    if (isAiDirected(injectionFlags(`${m.subject}\n${m.text}`))) {
+      read.skipped.flagged++;
+      continue;
+    }
     // ~2,500 characters each: enough for the facts, which are near the top; the model's limits are generous.
     read.push({ n: read.length + 1, sender: r.sender, subject: r.subject, date: r.date, text: m.text.slice(0, 2500) });
   }
   return read;
 }
 
+/** Why matching mail was left out, for the "I found no email" replies: never say nothing exists when something was skipped on purpose. */
+export function skippedNote(read: { skipped: { bulk: number; flagged: number } }): string {
+  const parts: string[] = [];
+  if (read.skipped.flagged) parts.push(`${read.skipped.flagged} matching email${read.skipped.flagged > 1 ? "s were" : " was"} not read because ${read.skipped.flagged > 1 ? "they contain" : "it contains"} instructions aimed at an AI`);
+  if (read.skipped.bulk) parts.push(`${read.skipped.bulk} newsletter${read.skipped.bulk > 1 ? "s or promotions were" : " or promotion was"} left out`);
+  return parts.length ? ` (${parts.join("; ")})` : "";
+}
+
 // Emails arrive in several languages while requests are in English: widen the main words of a search
 // with their French, Spanish and Catalan forms (Gmail ignores accents).
 const TRANSLATIONS: [RegExp, string[]][] = [
+  [/^(bills?|payments?|charges?)$/, ["bill", "invoice", "payment", "renewal", "renews", "due", "factura", "facture"]],
   [/^races?$/, ["race", "carrera", "cursa", "course"]],
   [/^marathons?$/, ["marathon", "maraton", "marato"]],
   [/^(registration|registered|register|sign(ed)?[- ]?up|enrol(l?ment|led)?)$/, ["registration", "inscripcion", "inscripcio", "inscription"]],
@@ -595,12 +891,16 @@ export function widenQuery(query: string): string {
 }
 
 /** Search words from a request when the model gave none: what's left after the request's own wording. */
-function searchWords(text: string) {
-  const filler = /^(from|my|the|emails?|mail|inbox|check|find|look|when|what|where|did|do|i|it|its|a|an|to|in|into|on|for|and|then|add|put|calendar|agenda|please|can|you|could|me|that|this|was|is|of|up|at|with)$/i;
-  return text.split(/[^\p{L}\p{N}'-]+/u).filter((w) => w.length > 1 && !filler.test(w)).slice(0, 6).join(" ");
+/** Words that never help find a mail: the request's wrapper ("find the email and tell me what…"), not its subject. */
+const SEARCH_FILLER =
+  /^(?:from|my|mine|the|a|an|and|or|not|then|of|for|about|to|in|into|on|at|with|by|up|out|is|are|was|were|be|been|it|its|it's|this|that|these|those|there|here|i|i'm|i've|me|you|your|we|us|what|what's|whats|when|when's|where|where's|who|who's|whom|which|why|how|how's|did|do|does|done|have|has|had|can|could|would|should|will|please|just|any|anything|some|something|all|much|many|email|emails|e-mail|mail|mails|inbox|message|messages|thread|check|find|look|search|show|tell|give|let|know|see|read|get|got|send|sent|say|said|says|add|put|calendar|agenda|cost|costs|price|amount|date|dates|time|times|details?|info|information|latest|recent|soon|coming|come|due|guy|guys|man|woman|person|people|someone|somebody|thing|things|stuff|lady|remind|reminder|set|before|after|renews?|expires?|appointment)$/i;
+
+/** The words of a request that could find its mail ("what's in the book club email" -> "book club"). */
+export function searchWords(text: string) {
+  return text.split(/[^\p{L}\p{N}'-]+/u).filter((w) => w.length > 1 && !SEARCH_FILLER.test(w)).slice(0, 6).join(" ");
 }
 
-const EVENT_SYSTEM = [
+export const EVENT_SYSTEM = [
   "The user wants an event in their calendar. From the sources below (their emails, or web pages), find the event they ask about (one they registered for, booked, bought tickets for or were invited to, or the public event they name) and give:",
   "found: true only if a source states the DATE the event takes place (not the date an email was sent or a registration was made).",
   "source: the number of the source that gives the date.",
@@ -610,12 +910,12 @@ const EVENT_SYSTEM = [
   UNTRUSTED_DATA_RULES,
   "Answer with JSON only.",
 ].join("\n");
-const EVENT_SCHEMA = {
+export const EVENT_SCHEMA = {
   type: "object",
   properties: { found: { type: "boolean" }, source: { type: "integer" }, title: { type: "string" }, date: { type: "string" }, start: { type: "string" }, end: { type: "string" }, location: { type: "string" } },
   required: ["found", "source", "title", "date", "start", "end", "location"],
 };
-const FoundEvent = z.object({
+export const FoundEvent = z.object({
   found: z.boolean(),
   source: z.number().int().catch(1),
   title: z.string().default(""),
@@ -667,9 +967,29 @@ async function extractEvent(ctx: Ctx, text: string, docs: SourceDoc[], items: Sk
   } catch {
     return { reply: "I read the matching sources but couldn't make out the event's date. They're listed below.", items };
   }
-  const date = realDay(f.date);
+  let date = realDay(f.date);
+  // The model found no date, but an email names one weekday ("next Tuesday") and maybe a window ("between 9 and 12"): use them.
+  if (!f.found || !date) {
+    const mail = docs.find((d) => /^Date sent: \d{4}-\d{2}-\d{2}/m.test(d.body) && weekdayAfter(d.body, d.body.match(/^Date sent: (\d{4}-\d{2}-\d{2})/m)![1]));
+    if (mail) {
+      const sentOn = mail.body.match(/^Date sent: (\d{4}-\d{2}-\d{2})/m)![1];
+      const window = mail.body.match(/\b(?:between|from)\s+(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\s*(?:and|to|-|–)\s*(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?/i);
+      const hh = (h: string, ap?: string) => String(ap?.toLowerCase() === "pm" && +h < 12 ? +h + 12 : !ap && +h < 8 ? +h + 12 : +h).padStart(2, "0");
+      f.found = true;
+      f.source = mail.n;
+      f.date = weekdayAfter(mail.body, sentOn)!;
+      f.title = f.title || mail.title.replace(/\b(?:next|this|on)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i, "").trim();
+      const single = window ? null : mail.body.match(/\b(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)\b|\b(\d{1,2})[:h](\d{2})\b/i);
+      f.start = window ? `${hh(window[1], window[3] ?? window[6])}:${window[2] ?? "00"}` : single ? `${single[1] ? String(single[3].toLowerCase() === "pm" && +single[1] < 12 ? +single[1] + 12 : +single[1]).padStart(2, "0") : single[4].padStart(2, "0")}:${single[2] ?? single[5] ?? "00"}` : "";
+      f.end = window ? `${hh(window[4], window[6])}:${window[5] ?? "00"}` : "";
+      date = realDay(f.date);
+    }
+  }
   if (!f.found || !date) return { reply: "I found sources that seem related, but none of them gives the date of the event, so I didn't add anything. They're listed below.", items };
   const src = docs.find((d) => d.n === f.source) ?? docs[0];
+  // The email says "next Tuesday" and the model's date is a Sunday: the weekday in the email wins.
+  const sent = src.body.match(/^Date sent: (\d{4}-\d{2}-\d{2})/m)?.[1];
+  if (sent) date = realDay(correctWeekdayDate(ymdOf(date), src.body, sent)) ?? date;
   const title = f.title.replace(/\s+/g, " ").trim().slice(0, 120) || src.title.slice(0, 120);
   const location = f.location.replace(/\s+/g, " ").trim().slice(0, 200) || null;
   const prepared = eventOn(title, location, date, f.start.trim(), f.end.trim(), tzName, ctx.now());
@@ -702,11 +1022,17 @@ export async function findEventInEmail(ctx: Ctx, text: string, query: string, pr
   let read;
   try {
     read = await readMatches(ctx, q, 4, progress);
+    // "the hike with maria": the model's words as a whole match nothing; the main ones do.
+    // Two words at least: one word alone ("yoga") can find another event, and a wrong date is worse than none.
+    for (const loose of read.length ? [] : looserQueries(query.trim() || searchWords(text)).filter((q) => q.includes(" "))) {
+      read = await readMatches(ctx, widenQuery(loose), 4, progress);
+      if (read.length) break;
+    }
   } catch (err) {
     if (denied(err)) return { reply: "The Inbox agent needs Read on Gmail for that. Grant it in Connections & Permissions.", section: "permissions" };
     throw err;
   }
-  if (!read.length) return { reply: `I found no email matching “${query || searchWords(text)}”. Try naming the event or who it's from (e.g. “add the marathon from RunReg to my calendar”).` };
+  if (!read.length) return { reply: `I found no email matching “${query || searchWords(text)}”${skippedNote(read)}. Try naming the event or who it's from (e.g. “add the marathon from RunReg to my calendar”).` };
   const docs = read.map((r) => ({
     n: r.n,
     label: `email [${r.n}] from ${r.sender}`,
@@ -746,7 +1072,18 @@ async function webSources(ctx: Ctx, query: string, progress: (s: string) => void
 const webItems = (results: WebResult[]) => results.slice(0, 5).map((r) => ({ title: `[${r.n}] ${r.title}`, detail: new URL(r.url).hostname, href: r.url }));
 
 /** "When is the Barcelona marathon 2027? Add it to my calendar": the event from public web pages. */
-export async function findEventOnWeb(ctx: Ctx, text: string, query: string, progress: (s: string) => void, llm: LlmProvider = localLlm(ctx, "background")): Promise<EventFromEmail> {
+export async function findEventOnWeb(ctx: Ctx, text: string, query: string, progress: (s: string) => void, llm: LlmProvider = localLlm(ctx, "background"), nextYear = false): Promise<EventFromEmail> {
+  const first = await findEventOnWebOnce(ctx, text, nextYear ? `${query} ${ctx.now().getUTCFullYear() + 1}` : query, progress, llm);
+  // The edition found is already over (this year's race): the user means the next one.
+  if (!nextYear && "reply" in first && /is already over, so I didn't add it/.test(first.reply)) {
+    progress("That one is over: looking for the next edition…");
+    const next = await findEventOnWeb(ctx, text, query, progress, llm, true);
+    if ("prepared" in next) return next;
+  }
+  return first;
+}
+
+async function findEventOnWebOnce(ctx: Ctx, text: string, query: string, progress: (s: string) => void, llm: LlmProvider): Promise<EventFromEmail> {
   const found = await webSources(ctx, query, progress);
   if (!("results" in found)) return found;
   const docs = found.results.map((r) => ({
@@ -767,15 +1104,41 @@ export async function emailQuestion(ctx: Ctx, question: string, query: string, p
   let read;
   try {
     read = await readMatches(ctx, widenQuery(query), 3, progress);
+    // Nothing but newsletters matched and the user asked about it by name ("the weekly recipes email"): read it (the injection check still applies).
+    if (!read.length && read.skipped.bulk) read = await readMatches(ctx, widenQuery(query), 3, progress, true);
+    // The model's query had words the mail doesn't use ("car insurance renewal cost AND date"): retry with the main words only.
+    for (const loose of read.length ? [] : looserQueries(query)) {
+      read = await readMatches(ctx, widenQuery(loose), 3, progress);
+      if (read.length) {
+        query = loose;
+        break;
+      }
+    }
   } catch (err) {
     if (denied(err)) return { reply: "The Inbox agent needs Read on Gmail for that. Grant it in Connections & Permissions.", section: "permissions" };
     throw err;
   }
-  if (!read.length) return { reply: `I found no email matching “${query}”, so I can't answer that from your mail.` };
+  if (!read.length) {
+    // "Has Priya answered?", "when did I write to priya": a wait the app already tracks answers it.
+    const waits = all<{ recipient: string; subject: string; sent_at: string }>(ctx.db, `SELECT recipient, subject, sent_at FROM waiting_on WHERE 1 = 1${demoRowsFilter()} ORDER BY sent_at`);
+    const named = query.match(/from:\(?"?([\p{L}'-]+)/u)?.[1]?.toLowerCase();
+    const wait = named
+      ? waits.find((w) => w.recipient.toLowerCase().includes(named))
+      : waits.find((w) => {
+          const first = w.recipient.replace(/\s*<[^>]*>/, "").split(/\s+/)[0];
+          return first.length > 2 && new RegExp(`\\b${first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(question);
+        });
+    const who = named ?? wait?.recipient.replace(/\s*<[^>]*>/, "").split(/\s+/)[0].toLowerCase();
+    if (wait) {
+      const days = Math.floor((ctx.now().getTime() - Date.parse(wait.sent_at)) / 86_400_000);
+      return { reply: `Not yet: you're still waiting for ${wait.recipient.replace(/\s*<[^>]*>/, "")} to answer “${wait.subject}” (you wrote ${days} day${days === 1 ? "" : "s"} ago). Say “nudge ${who}” to draft a follow-up.` };
+    }
+    return { reply: `I found no email matching “${query}”${skippedNote(read)}, so I can't answer that from your mail.` };
+  }
   progress("Writing the answer…");
   const out = await llm.generate(ANSWER_SYSTEM, `Question: ${question}\n\n${read.map((r) => fenceUntrusted(`email [${r.n}] from ${r.sender}`, `Subject: ${r.subject}\nDate: ${r.date.slice(0, 10)}\n\n${r.text}`)).join("\n\n")}`, { maxTokens: 200, timeoutMs: 1_200_000 });
   return {
-    reply: plainAnswer(out.text),
+    reply: groundNumbers(plainAnswer(out.text), `${ctx.now().toISOString().slice(0, 10)} ${question} ${read.map((r) => `${r.subject} ${r.date.slice(0, 10)} ${r.text}`).join(" ")}`),
     items: read.map((r) => ({ title: `[${r.n}] ${r.subject}`, detail: `${parseSender(r.sender).name ?? r.sender} · ${dayLabel(r.date)}` })),
   };
 }
@@ -795,7 +1158,7 @@ export async function meetingPrep(ctx: Ctx, text: string, who: string, progress:
   const upcoming = await agenda(ctx, text).catch(() => null);
   const events = (upcoming?.items ?? []).filter((e) => e.title.toLowerCase().includes(w));
   const event = events[0] ?? null;
-  let read: Awaited<ReturnType<typeof readMatches>> = [];
+  let read: Awaited<ReturnType<typeof readMatches>> = Object.assign([], { skipped: { bulk: 0, flagged: 0 } });
   if (isConnected(ctx, "gmail")) {
     try {
       read = await readMatches(ctx, `"${who.replace(/"/g, "")}" newer_than:90d`, 3, progress);
@@ -816,7 +1179,7 @@ export async function meetingPrep(ctx: Ctx, text: string, who: string, progress:
     ...read.map((r) => fenceUntrusted(`email [${r.n}] from ${r.sender}`, `Subject: ${r.subject}\nDate: ${r.date.slice(0, 10)}\n\n${r.text}`)),
     ...notes.map((n) => fenceUntrusted(`note: ${n.title}`, n.text)),
   ].join("\n\n");
-  const out = await llm.generate(PREP_SYSTEM, `Meeting with or about: ${who}\n\n${material}`, { maxTokens: 260, timeoutMs: 1_200_000 });
+  const out = await llm.generate(PREP_SYSTEM, `Today is ${localToday(ctx.now(), tz()).y}-${String(localToday(ctx.now(), tz()).m).padStart(2, "0")}-${String(localToday(ctx.now(), tz()).d).padStart(2, "0")}. The user asked: ${text}\nMeeting with or about: ${who}\n\n${material}`, { maxTokens: 260, timeoutMs: 1_200_000 });
   return {
     reply: plainAnswer(out.text),
     items: [...(event ? [{ title: `📅 ${event.title}`, detail: event.detail }] : []), ...read.map((r) => ({ title: `[${r.n}] ${r.subject}`, detail: `${parseSender(r.sender).name ?? r.sender} · ${dayLabel(r.date)}` })), ...notes.map((n) => ({ title: `📝 ${n.title}` }))],
@@ -849,6 +1212,8 @@ export async function draftReplyFree(ctx: Ctx, who: string, message: string, pro
     throw err;
   }
   const msg = rows[0];
+  // No mail from them, but the user is waiting on their answer ("can you write to priya"): that is a follow-up.
+  if (!msg && all<{ n: number }>(ctx.db, `SELECT 1 AS n FROM waiting_on WHERE lower(recipient) LIKE ?${demoRowsFilter()}`, `%${name.toLowerCase()}%`).length) return nudge(ctx, name);
   if (!msg) return { reply: `I couldn't find a personal email from “${who}” in the last 90 days to reply to (newsletters and mailing lists don't count). I can only reply to an email I can find: say “reply to <name> that …”.` };
   const { name: senderName, email } = parseSender(msg.sender);
   if (!email) return { reply: "I couldn't read that sender's address." };
@@ -896,8 +1261,82 @@ export async function notesAnswer(ctx: Ctx, query: string, progress: (s: string)
   const res = await retrieve(ctx, { query, provider, k: 4, answer: true }, localLlm(ctx, "background"), "chief_of_staff");
   if (!res.passages.length) return { reply: `I found nothing about “${query}” in your notes.`, section: "knowledge" };
   return {
-    reply: res.answer?.text ? plainAnswer(res.answer.text) : `Top notes for “${query}”:`,
+    reply: res.answer?.text ? groundNumbers(plainAnswer(res.answer.text), `${query} ${res.passages.map((p) => `${p.title} ${p.text}`).join(" ")}`) : `Top notes for “${query}”:`,
     items: res.passages.map((p) => ({ title: p.title, detail: `${p.text.slice(0, 160)}${p.text.length > 160 ? "…" : ""}${p.flags.length ? " ⚠ contains instruction-like text (treated as data)" : ""}` })),
     section: "tech",
   };
+}
+
+
+/** Does a note clearly cover this request ("how much is left of the kitchen budget")? Used before answering "I can't do that". */
+export async function notesLikely(ctx: Ctx, text: string, minWords = 1): Promise<boolean> {
+  if (!check(ctx, "knowledge", "demo-notes", "read")) return false;
+  const stop = new Set(["much", "left", "with", "that", "this", "what", "have", "from", "about", "there", "would", "could", "should", "please", "tell", "show", "give", "need", "want", "know", "when", "which", "does", "into", "over", "your", "mine", "anything", "something", "today", "tomorrow", "week", "time", "make", "sure", "remind", "reminder", "email", "mail", "calendar", "some", "much", "many", "they", "them", "were", "will", "just", "like"]);
+  const words = (text.toLowerCase().match(/\p{L}{4,}/gu) ?? []).filter((w) => !stop.has(w)).map((w) => w.replace(/s$/, ""));
+  if (!words.length) return false;
+  const res = await retrieve(ctx, { query: text, provider: "lexical", k: 2 }, undefined, "chief_of_staff");
+  return res.passages.some((p) => new Set(words.filter((w) => p.title.toLowerCase().includes(w))).size >= minWords);
+}
+
+/** "What's Priya's email?": addresses from the user's own mail (tracked waits and synced headers). Nothing is guessed. */
+export function contactLookup(ctx: Ctx, who: string): SkillAnswer {
+  const w = who.toLowerCase().trim();
+  const seen = new Map<string, string>();
+  const rows = [
+    ...all<{ addr: string }>(ctx.db, `SELECT recipient AS addr FROM waiting_on WHERE 1 = 1${demoRowsFilter()}`),
+    ...all<{ addr: string }>(ctx.db, `SELECT sender AS addr FROM messages WHERE 1 = 1${demoRowsFilter()} ORDER BY received_at DESC LIMIT 500`),
+  ];
+  for (const { addr } of rows) {
+    const { name, email } = parseSender(addr);
+    const full = addr.replace(/\s*<[^>]*>/, "").replace(/"/g, "").trim();
+    if (email && new RegExp(`(?<![\\p{L}])${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "iu").test(`${full} ${email}`)) seen.set(email.toLowerCase(), name ? full : email);
+  }
+  if (!seen.size) return { reply: `I don't have an email address for “${who}” in your recent mail.` };
+  const list = [...seen].map(([email, label]) => (label === email ? email : `${label} — ${email}`));
+  return { reply: list.length === 1 ? `${list[0]} (from your mail).` : `I found ${list.length} addresses for “${who}”:`, items: list.length > 1 ? list.map((l) => ({ title: l })) : undefined };
+}
+
+/** "car insurance renewal cost AND date" -> "car insurance": search operators, alternatives and question words dropped, at most the first two main words. Null if nothing is left. */
+export function looserQuery(query: string): string | null {
+  return looserQueries(query)[0] ?? null;
+}
+
+/** Looser and looser versions of a search that found nothing: the first two main words, then the first alone. */
+export function looserQueries(query: string): string[] {
+  if (/\b(?:from|to|subject|label|in|after|before|newer_than|older_than):/i.test(query)) return []; // a precise search: leave it
+  const first = query.split(/\s+OR\s+/i)[0];
+  const words = first.replace(/[()"?.,!]/g, " ").split(/\s+/).filter((w) => w.length > 1 && !SEARCH_FILLER.test(w));
+  const longest = [...words].sort((a, b) => b.length - a.length)[0] ?? "";
+  return [...new Set([words.slice(0, 3).join(" "), words.slice(0, 2).join(" "), words[0] ?? "", longest])].filter((q) => q && q !== query);
+}
+
+/**
+ * Last resort, when a request can't be placed with confidence: one short question built from the user's own words and the
+ * people the app knows, instead of a guess or a generic "I can't". Used rarely on purpose (tests count every ask as a miss).
+ */
+export function clarify(ctx: Ctx, text: string): string {
+  const known = new Map<string, string>();
+  const rows = [
+    ...all<{ addr: string }>(ctx.db, `SELECT recipient AS addr FROM waiting_on WHERE 1 = 1${demoRowsFilter()}`),
+    ...all<{ addr: string }>(ctx.db, `SELECT sender AS addr FROM messages WHERE 1 = 1${demoRowsFilter()} ORDER BY received_at DESC LIMIT 300`),
+  ];
+  for (const { addr } of rows) {
+    const first = parseSender(addr).name?.split(/\s+/)[0];
+    if (first && first.length > 2) known.set(first.toLowerCase(), first);
+  }
+  const person = (text.match(/\p{L}[\p{L}'-]+/gu) ?? []).map((w) => known.get(w.toLowerCase())).find(Boolean);
+  const when = text.match(/\b(today|tonight|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next week|this week(?:end)?)\b/i)?.[1];
+  const options = person
+    ? [`reply to ${person} that …`, `find the email from ${person}`, `did ${person} answer?`]
+    : when
+      ? [`what's on ${when}?`, `remind me ${when} to …`, `add event: … ${when} at …`]
+      : ["what needs my attention in my email?", "what's on tomorrow?", "remind me to …"];
+  return `I'm not sure what you'd like me to do with “${text.trim().slice(0, 80)}”. Could you say it a bit more fully, for example “${options.join("”, “")}”?`;
+}
+
+/** "List my reminders": the open ones, soonest first. */
+export function remindersList(ctx: Ctx): SkillAnswer {
+  const open = listReminders(ctx).filter((r) => !r.done_at);
+  if (!open.length) return { reply: "You have no open reminders.", section: "today" };
+  return { reply: `${open.length} open reminder${open.length === 1 ? "" : "s"}:`, items: open.slice(0, 15).map((r) => ({ title: r.text, detail: r.due_at ? `due ${dayLabel(r.due_at)} at ${hm(r.due_at)}` : "no date" })), section: "today" };
 }

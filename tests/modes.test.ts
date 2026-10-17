@@ -145,3 +145,46 @@ describe("personal app shows nothing fictional", () => {
     expect(state.today.briefing?.simulated).toBe(0);
   });
 });
+
+import { agenda, contactLookup, nudge, notesLikely, priorities, subscriptions, trips, waitingOn } from "@/server/agents/assistant";
+import { runCommand } from "@/server/agents/command";
+import { workflows } from "@/server/agents/chiefOfStaff";
+
+describe("the assistant's own answers in the personal app contain nothing fictional", () => {
+  // Every name, address and place of the seeded demo data that an answer could carry.
+  const FICTION = /Priya|Maria|Lopez|Jordan|Tom Becker|Riverside Dental|Spokes|Café Lumen|Library|Alfama|Example Air|example\.(?:com|org)|bank\.example|Streaming Example|CloudNotes|Community garden|Lunch with Sam|Long run/i;
+  // The user's own words may be echoed back ("no address for “priya”"): only data from the rows counts as a leak.
+  const leak = (x: unknown, asked = "") => asked.split(/[^\p{L}]+/u).filter((w) => w.length > 2).reduce((t, w) => t.replace(new RegExp(w, "gi"), ""), JSON.stringify(x)).match(FICTION)?.[0] ?? null;
+
+  it("every read path the assistant uses hides the seeded demo rows", async () => {
+    const ctx = seededCtx(); // full fictional data: calendar, inbox, waits, bookings, subscriptions, notes
+    withMode("personal");
+    const answers: Record<string, unknown> = {
+      priorities: await priorities(ctx),
+      today: await agenda(ctx, "what's on today"),
+      saturday: await agenda(ctx, "what am I doing saturday"),
+      week: await agenda(ctx, "what's my week like"),
+      next: await agenda(ctx, "when is my next long run"),
+      comingUp: await agenda(ctx, "is there a spanish thing coming up"),
+      contact: contactLookup(ctx, "priya"),
+      waiting: await waitingOn(ctx),
+      nudge: await nudge(ctx, "Priya"),
+      oldest: await nudge(ctx, "longest"),
+      trips: await trips(ctx),
+      subscriptions: await subscriptions(ctx),
+    };
+    const asked: Record<string, string> = { next: "when is my next long run", contact: "priya", nudge: "Priya", comingUp: "is there a spanish thing coming up", saturday: "what am I doing saturday" };
+    for (const [name, answer] of Object.entries(answers)) expect([name, leak(answer, asked[name])]).toEqual([name, null]);
+    expect(await notesLikely(ctx, "how much is left of the kitchen budget")).toBe(false); // demo notes are not the user's
+    expect(all(ctx.db, "SELECT id FROM actions WHERE is_demo = 1 AND status = 'proposed' AND created_at > datetime('now', '-1 minute')")).toHaveLength(0); // no demo follow-up drafted
+  });
+
+  it("whole requests through the command bar too (quick rules, no model)", async () => {
+    const ctx = seededCtx();
+    withMode("personal");
+    for (const text of ["what should I do first today", "who hasn't gotten back to me?", "what's on my calendar today?", "what's priya's email", "chase the oldest one", "whats on tmrw"]) {
+      const r = await runCommand(ctx, text, workflows);
+      expect([text, leak(r, text)]).toEqual([text, null]);
+    }
+  });
+});

@@ -233,6 +233,19 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE requests ADD COLUMN owner TEXT;
     `,
   },
+  {
+    version: 20,
+    description: "Corrections: when the user says a request was understood wrong and picks the right kind; they become examples for the router",
+    sql: `
+      CREATE TABLE IF NOT EXISTS route_corrections (
+        id TEXT PRIMARY KEY,
+        text TEXT NOT NULL,
+        wrong TEXT,
+        chosen TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.at(-1)?.version ?? 1;

@@ -77,7 +77,8 @@ export function normalizeDayWords(text: string): string {
   return text.replace(/\b(?:tmrw|tmr|tmrow|tomorow|tommorow|tommorrow|tomorrow|2moro|2morrow)\b/gi, "tomorrow").replace(/\btonite\b/gi, "tonight");
 }
 
-export function parseEventRequest(text: string, now: Date, tz: string): PreparedEvent | { error: string } {
+/** `defaultMinutes`: the time of day to use when the text gives a date but no time (a reminder is due at 09:00, not at midnight). */
+export function parseEventRequest(text: string, now: Date, tz: string, defaultMinutes?: number): PreparedEvent | { error: string } {
   let s = ` ${normalizeDayWords(text).replace(/\s+/g, " ").trim()} `;
   const take = (re: RegExp) => {
     const m = s.match(re);
@@ -85,9 +86,20 @@ export function parseEventRequest(text: string, now: Date, tz: string): Prepared
     return m;
   };
   const today = localNow(now, tz);
+  // "in 2 hours", "in 30 minutes", "in an hour": an exact moment from now (reminders only: they carry a default time).
+  const rel = defaultMinutes !== undefined ? s.match(/\s(?:in|dans)\s+(\d{1,3}|an?|one|two|three|four|five|six|half an)\s+(hours?|hrs?|minutes?|mins?)(?=\s)/i) : null;
+  let relative: { date: Ymd; minutes: number } | null = null;
+  if (rel) {
+    const words: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, "half an": 0.5 };
+    const n = /^\d/.test(rel[1]) ? +rel[1] : words[rel[1].toLowerCase()];
+    const target = new Date(now.getTime() + n * (/^h/i.test(rel[2]) ? 3_600_000 : 60_000));
+    relative = localNow(target, tz);
+    s = s.replace(rel[0], " ");
+  }
 
   // ---- time: a range, a single time, or noon/midnight; then an optional duration
   let start: number | null = null;
+  let m0: RegExpMatchArray | null = null;
   let end: number | null = null;
   // Only a range if one side has minutes, am/pm or "h" ("3-4pm", "10:00 to 11:30", "10h à 11h"), not "2-3 people".
   const range = s.match(new RegExp(`\\s(?:from\\s+|de\\s+)?${TIME}\\s*(?:-|–|to|until|till|à|jusqu'à)\\s*${TIME}(?=\\s)`, "i"));
@@ -112,8 +124,22 @@ export function parseEventRequest(text: string, now: Date, tz: string): Prepared
     } else if (single) {
       start = toMinutes(single[1], single[2], single[3]);
       if (start === null) return { error: "That time doesn't look right. Try “3pm” or “15:00”." };
-    } else if (take(/\s(?:(?:at|à)\s+)?(?:noon|midi)(?=\s)/i)) start = 12 * 60;
+    } else if ((m0 = take(/\s(?:at\s+)?half past (\d{1,2})(?=\s)/i))) start = (+m0[1] <= 6 ? +m0[1] + 12 : +m0[1]) * 60 + 30;
+    else if (take(/\s(?:(?:at|à)\s+)?(?:noon|midday|midi)(?=\s)/i)) start = 12 * 60;
     else if (take(/\s(?:(?:at|à)\s+)?(?:midnight|minuit)(?=\s)/i)) start = 0;
+  }
+  // "friday evening", "in the morning", "tonight": a rough time of day, and "tonight at 8" means 20:00, not 08:00.
+  {
+    // "night" counts only after a day ("friday night", "tomorrow night") or as "at night": "night shift" keeps its title.
+    const word = (take(/\s(?:in the\s+|this\s+|on\s+)?(morning|afternoon|evening)(?=\s)/i) ?? take(/(?:(?<=(?:mon|tues|wednes|thurs|fri|satur|sun)day|tomorrow|tmrw)\s+|\s+at\s+)(night)(?=\s)/i))?.[1].toLowerCase();
+    // "night" only gives a default time (20:00): an explicit "1am-4am night shift" stays in the early morning.
+    const part = (word === "night" ? undefined : word) as "morning" | "afternoon" | "evening" | undefined;
+    const nightWord = word === "night";
+    const tonight = /\s(?:tonight|tonite)(?=\s)/i.test(s);
+    if (start === null && nightWord) start = 20 * 60;
+    else if (start === null && part) start = { morning: 9, afternoon: 15, evening: 18 }[part] * 60;
+    else if (start === null && tonight) start = 20 * 60;
+    else if (start !== null && start < 12 * 60 && (part === "afternoon" || part === "evening" || tonight)) start += 12 * 60;
   }
   const duration = take(/\s(?:for|pendant|pour)\s+(an?|half an|une|\d+(?:\.\d+)?)\s*(hours?|hrs?|heures?|h|minutes?|mins?|m)(?=\s)/i);
   if (start !== null && end === null) {
@@ -128,21 +154,56 @@ export function parseEventRequest(text: string, now: Date, tz: string): Prepared
   // ---- date
   let date: Ymd | null = null;
   let m: RegExpMatchArray | null;
-  if ((m = take(/\s(?:on\s+)?(\d{4})-(\d{2})-(\d{2})(?=\s)/))) date = { y: +m[1], m: +m[2], d: +m[3] };
+  if (relative) {
+    date = relative.date;
+    start = relative.minutes;
+    end = relative.minutes + 15;
+  } else if ((m = take(/\s(?:on\s+)?(\d{4})-(\d{2})-(\d{2})(?=\s)/))) date = { y: +m[1], m: +m[2], d: +m[3] };
   else if (take(/\s(?:(?:the\s+)?day after tomorrow|apr[eè]s-demain)(?=\s)/i)) date = addDays(today.date, 2);
   else if (take(/\s(?:today|tonight|aujourd'hui|ce soir)(?=\s)/i)) date = today.date;
   else if (take(/\s(?:tomorrow|demain)(?=\s)/i)) date = addDays(today.date, 1);
-  else if ((m = take(/\s(?:in|dans)\s+(\d{1,2})\s+(days?|weeks?|jours?|semaines?)(?=\s)/i))) date = addDays(today.date, +m[1] * (/^(w|s)/i.test(m[2]) ? 7 : 1));
+  else if ((m = take(/\s(?:in|dans)\s+(\d{1,2}|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|a couple of)\s+(days?|weeks?|months?|jours?|semaines?|mois)(?=\s)/i))) {
+    const words: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, "a couple of": 2 };
+    const n = /^\d/.test(m[1]) ? +m[1] : words[m[1].toLowerCase()];
+    if (/^(mon|mois)/i.test(m[2])) {
+      const t = new Date(Date.UTC(today.date.y, today.date.m - 1 + n, today.date.d));
+      date = { y: t.getUTCFullYear(), m: t.getUTCMonth() + 1, d: t.getUTCDate() };
+    } else date = addDays(today.date, n * (/^(w|s)/i.test(m[2]) ? 7 : 1));
+  }
   else if ((m = take(new RegExp(`\\s(?:on\\s+|le\\s+)?(?:(next|this|ce)\\s+)?${WEEKDAY_RE}(?:\\s+(prochain))?(?=\\s)`, "i")))) {
     const target = weekdayNumber(m[2]);
     const current = new Date(Date.UTC(today.date.y, today.date.m - 1, today.date.d)).getUTCDay();
     let ahead = (target - current + 7) % 7;
-    if (ahead === 0 && !/^(this|ce)$/i.test(m[1] ?? "")) ahead = 7;
+    // "next friday" / "vendredi prochain": that day in the following calendar week (weeks start on Monday), as for emails.
+    if (/^next$/i.test(m[1] ?? "") || m[3]) ahead = (((8 - current) % 7) || 7) + ((target + 6) % 7);
+    else if (ahead === 0 && !/^(this|ce)$/i.test(m[1] ?? "")) ahead = 7;
     date = addDays(today.date, ahead);
   } else if ((m = take(new RegExp(`\\s(?:on\\s+|le\\s+)?(?:the\\s+)?(\\d{1,2})(?:st|nd|rd|th|er)?\\s+(?:of\\s+)?${MONTH_RE}(?:\\s+(\\d{4}))?(?=\\s)`, "i")))) {
     date = withYear(+m[1], monthNumber(m[2]), m[3], today.date);
   } else if ((m = take(new RegExp(`\\s(?:on\\s+)?${MONTH_RE}\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s+(\\d{4}))?(?=\\s)`, "i")))) {
     date = withYear(+m[2], monthNumber(m[1]), m[3], today.date);
+  } else if ((m = take(/\s(?:on\s+)?the\s+(\d{1,2})(?:st|nd|rd|th)(?=\s)/i))) {
+    // "on the 1st": the next time that day of the month comes round.
+    let y = today.date.y;
+    let mo = today.date.m;
+    if (+m[1] < today.date.d) {
+      mo++;
+      if (mo > 12) {
+        mo = 1;
+        y++;
+      }
+    }
+    date = { y, m: mo, d: +m[1] };
+  } else if (defaultMinutes !== undefined && take(/\s(?:next week)(?=\s)/i)) {
+    // a reminder "next week": the Monday
+    const cur = new Date(Date.UTC(today.date.y, today.date.m - 1, today.date.d)).getUTCDay();
+    date = addDays(today.date, ((8 - cur) % 7) || 7);
+  } else if (defaultMinutes !== undefined && take(/\s(?:this|at the|on the|over the) weekend(?=\s)/i)) {
+    const cur = new Date(Date.UTC(today.date.y, today.date.m - 1, today.date.d)).getUTCDay();
+    date = addDays(today.date, (6 - cur + 7) % 7);
+  } else if (defaultMinutes !== undefined && take(/\s(?:at |by )?(?:the )?end of (?:the |this )?month(?=\s)/i)) {
+    const last = new Date(Date.UTC(today.date.y, today.date.m, 0));
+    date = { y: last.getUTCFullYear(), m: last.getUTCMonth() + 1, d: last.getUTCDate() };
   } else if ((m = take(/\s(?:on\s+|le\s+)?(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?=\s)/))) {
     date = withYear(+m[1], +m[2], m[3] && m[3].length === 2 ? `20${m[3]}` : m[3], today.date);
   }
@@ -159,9 +220,13 @@ export function parseEventRequest(text: string, now: Date, tz: string): Prepared
     location = `${loc[1].toLowerCase() === "chez" ? "chez " : ""}${loc[2].trim().replace(/[.,;]+$/, "")}`;
   }
   else if (loc) s = `${s} ${loc[0]}`;
-  const title = s.replace(/\s(?:on|at|from|for|the|le|à|de|pour)\s*$/i, " ").replace(/^\s*(?:an?|the|une?|le|la)\s+/i, " ").replace(/\s+[,;]\s*|\s*,\s*$/g, " ").replace(/\s+/g, " ").trim().replace(/[.,;:]+$/, "");
+  const title = s.replace(/\s(?:on|at|from|for|the|le|à|de|pour|by|before|until|till|due|next|this|every|each)\s*$/i, " ").replace(/^\s*(?:an?|the|une?|le|la)\s+/i, " ").replace(/\s+[,;]\s*|\s*,\s*$/g, " ").replace(/\s+/g, " ").trim().replace(/[.,;:]+$/, "");
   if (!title) return { error: "What is the event? e.g. “add event: dentist tuesday 3pm”." };
 
+  if (start === null && defaultMinutes !== undefined) {
+    start = defaultMinutes;
+    end = start + 30;
+  }
   const allDay = start === null;
   let endDate = date;
   let endMin = end ?? 0;
@@ -280,4 +345,56 @@ export function eventOn(title: string, location: string | null, date: Ymd, start
     endsAt: zonedToUtc(endDate, to, tz).toISOString(),
   };
   return { ...event, googleUrl: googleCalendarUrl(event, date), ics: toIcs(event, now) };
+}
+
+const WEEKDAY_NAMES = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+
+/**
+ * The one weekday a text names and the date it means for a mail sent on `sentIso`: "next Tuesday" is that weekday in the following
+ * calendar week (weeks start on Monday); a bare "Tuesday" is the first one after the send date. Null if the text names none or several.
+ */
+function weekdayTarget(text: string, sentIso: string): { date: string; next: boolean; weekday: number } | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(sentIso)) return null;
+  const lower = text.toLowerCase();
+  const named = new Set([...lower.matchAll(/\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/g)].map((m) => m[1]));
+  if (named.size !== 1) return null;
+  const weekday = WEEKDAY_NAMES.indexOf([...named][0]);
+  const next = new RegExp(`\\bnext\\s+${[...named][0]}\\b`).test(lower);
+  const d = new Date(`${sentIso}T12:00:00Z`);
+  if (next) {
+    d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7) + 7 + ((weekday + 6) % 7)); // Monday of this week, a week later, plus the offset
+  } else {
+    do d.setUTCDate(d.getUTCDate() + 1);
+    while (d.getUTCDay() !== weekday);
+  }
+  return { date: d.toISOString().slice(0, 10), next, weekday };
+}
+
+/**
+ * A date the model took from an email must agree with a weekday the email names ("next Tuesday"): small local models miscount
+ * weekdays. If the text names exactly one weekday and the date is within two weeks of when the email was sent but is not that
+ * weekday (or, for "next <weekday>", not the right week), the date becomes the one the text means. Explicit far-off dates are left alone.
+ * Dates are "YYYY-MM-DD"; a due date in words ("18 October") is resolved first when `now` and `tz` are given. Pure.
+ */
+export function correctWeekdayDate(dateIso: string, text: string, sentIso: string, now?: Date, tz?: string): string {
+  if (now && tz && dateIso && !/^\d{4}-\d{2}-\d{2}$/.test(dateIso)) {
+    const parsed = parseEventRequest(`x ${dateIso}`, now, tz);
+    if ("error" in parsed || !/^\d{4}-\d{2}-\d{2}/.test(parsed.start)) return dateIso;
+    const iso = parsed.start.slice(0, 10);
+    const fixed = correctWeekdayDate(iso, text, sentIso);
+    return fixed === iso ? dateIso : fixed;
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateIso)) return dateIso;
+  const target = weekdayTarget(text, sentIso);
+  if (!target) return dateIso;
+  const day = (iso: string) => new Date(`${iso}T12:00:00Z`);
+  const gap = (day(dateIso).getTime() - day(sentIso).getTime()) / 86_400_000;
+  if (gap < -1 || gap > 13) return dateIso;
+  if (target.next ? dateIso === target.date : day(dateIso).getUTCDay() === target.weekday) return dateIso;
+  return target.date;
+}
+
+/** "next Tuesday" in a mail: the date it means for a mail sent on `sentIso` (see weekdayTarget), when the text names exactly one weekday. Else null. */
+export function weekdayAfter(text: string, sentIso: string): string | null {
+  return weekdayTarget(text, sentIso)?.date ?? null;
 }

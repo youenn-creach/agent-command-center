@@ -42,7 +42,20 @@ export function tokenize(text: string): string[] {
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .split(/\s+/)
     .filter((t) => t.length > 1 && !STOP.has(t))
-    .map((t) => (t.length > 4 && t.endsWith("s") ? t.slice(0, -1) : t));
+    .map(stem);
+}
+
+/** A light English stem, so "running", "runs" and "run" (or "planned" and "plan") match. Applied to queries and documents alike. */
+export function stem(t: string): string {
+  let w = t;
+  if (w.length > 5 && w.endsWith("ing")) w = w.slice(0, -3);
+  else if (w.length > 4 && w.endsWith("ied")) w = `${w.slice(0, -3)}y`;
+  else if (w.length > 4 && w.endsWith("ed")) w = w.slice(0, -2);
+  else if (w.length > 4 && w.endsWith("ies")) w = `${w.slice(0, -3)}y`;
+  else if (w.length > 3 && w.endsWith("s") && !w.endsWith("ss") && !w.endsWith("us")) w = w.slice(0, -1);
+  // "runn" -> "run", "plann" -> "plan"
+  if (w !== t && /([b-df-hj-np-tv-z])\1$/.test(w)) w = w.slice(0, -1);
+  return w;
 }
 
 export interface LexicalDoc {

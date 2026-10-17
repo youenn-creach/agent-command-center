@@ -26,7 +26,7 @@ function router(table: Record<string, Route>): LlmProvider & { calls: string[] }
     calls,
     async generate(_system, user) {
       calls.push(user);
-      const req = user.replace(/^Request: /, "");
+      const req = user.replace(/^[\s\S]*Request: /, ""); // after the similar examples, when there are any
       const route = table[req] ?? { skill: "unsupported", args: { reason: "not in the test table" } };
       return { text: JSON.stringify(route), model: "stub-router", ms: 1500 };
     },
@@ -73,7 +73,9 @@ function fakeGmail() {
         const groups = [...q.matchAll(/\(([^)]+)\)/g)].map((g) => g[1].split(/\s+OR\s+/));
         const plain = (t: string) => t.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
         if (groups.length) return groups.every((g) => g.some((w) => plain(`${MAIL[k].headers.Subject} ${MAIL[k].body}`).includes(plain(w))));
-        return true;
+        // Plain words: every one must appear, as in Gmail (operators like newer_than: aside).
+        const words = q.split(/\s+/).filter((w) => w && !w.includes(":"));
+        return words.every((w) => plain(`${MAIL[k].headers.From} ${MAIL[k].headers.Subject} ${MAIL[k].body}`).includes(plain(w)));
       });
       return Response.json({ messages: ids.map((id) => ({ id })) });
     }
@@ -364,6 +366,42 @@ describe("email review in two stages", () => {
   });
 });
 
+describe("an event date from the mail's weekday when the model finds none", () => {
+  it("'next Tuesday, between 9 and 12' becomes Tue 20 Oct 09:00-12:00", async () => {
+    vi.stubEnv("ACC_TIMEZONE", "Europe/Madrid");
+    reloadConfig();
+    const { ctx } = await withGmail();
+    MAIL.m12 = { days: 0.2, headers: { From: "landlord@example.com", To: "me@example.com", Subject: "Quuxheater inspection next Tuesday", "Message-ID": "<m12@x>" }, body: "The engineer can come between 9 and 12 next Tuesday. Does that work for you?" };
+    try {
+      const llm: LlmProvider = { id: "s", label: "s", generate: async () => ({ text: JSON.stringify({ found: false, source: 1, title: "", date: "", start: "", end: "", location: "" }), model: "s", ms: 1 }) };
+      const out = await findEventInEmail(ctx, "put the quuxheater inspection in my calendar", "quuxheater inspection", () => {}, llm);
+      expect("prepared" in out).toBe(true);
+      if ("prepared" in out) expect([out.prepared.start, out.prepared.end, out.prepared.title]).toEqual(["2026-10-20T09:00", "2026-10-20T12:00", "Quuxheater inspection"]);
+    } finally {
+      delete MAIL.m12;
+    }
+  });
+});
+
+describe("a person's question needs a reply", () => {
+  it("even when the model sees nothing to do; not for automated senders", async () => {
+    const { ctx } = await withGmail();
+    const judge: LlmProvider = {
+      id: "judge",
+      label: "judge",
+      async generate(system) {
+        // Stage 1 picks everything; stage 2 (the model) wrongly says nothing needs the user.
+        if (system.startsWith("Below is a numbered list")) return { text: JSON.stringify({ pick: [1, 2, 3, 4, 5] }), model: "judge", ms: 1 };
+        return { text: JSON.stringify({ needs_action: false, action: "", due: "", priority: "low", worth_knowing: "" }), model: "judge", ms: 1 };
+      },
+    };
+    const out = await reviewInbox(ctx, 7, () => {}, judge);
+    const titles = (out.items ?? []).map((i) => i.title).join(" | ");
+    expect(titles).toMatch(/Reply to Laura Martin about “Dinner on Saturday\?”/); // "Are you free for dinner on Saturday at 8?"
+    expect(titles).not.toMatch(/Endesa|statement|parcel/i); // no question asked of the user there
+  });
+});
+
 describe("worth knowing", () => {
   it("lists notable information separately from actions", async () => {
     const { ctx } = await withGmail();
@@ -570,6 +608,28 @@ describe("one request, several steps", () => {
     expect(late.reply).toMatch(/the deadline, Thu 1 Oct, has passed/);
     const none = await reminderFromEmail(ctx, text, "electricity bill", () => {}, stub({ found: false, source: 1, task: "", due: "" }));
     expect(none.reply).toMatch(/didn't add a reminder/);
+  });
+
+  it("reminds from the date the mail states, and finds the day from the mail's weekday when the user named the thing", async () => {
+    vi.stubEnv("ACC_TIMEZONE", "Europe/Madrid");
+    reloadConfig();
+    const { ctx } = await withGmail();
+    MAIL.m10 = { days: 0.2, headers: { From: "Northgate <policies@northgate.example>", To: "me@example.com", Subject: "Your zebracover policy renews on 1 December 2026", "Message-ID": "<m10@x>" }, body: "Your zebracover policy renews on 1 December 2026." };
+    MAIL.m11 = { days: 0.2, headers: { From: "landlord@example.com", To: "me@example.com", Subject: "Your gasfurnace inspection next Tuesday", "Message-ID": "<m11@x>" }, body: "The engineer can come between 9 and 12 next Tuesday." };
+    try {
+      // The model subtracted days itself (wrong date): the date in the mail wins, then the app subtracts the two weeks.
+      const a = await reminderFromEmail(ctx, "set a reminder two weeks before it renews", "zebracover", () => {}, stub({ found: true, source: 1, task: "Renew the policy", due: "2026-11-14" }));
+      expect(a.reply).toMatch(/due Tue 1 Dec/);
+      expect(a.reply).toMatch(/Tue 17 Nov at 09:00/);
+      // The user named the thing and the model found no task: "next Tuesday" in a mail sent on Monday 12 Oct is Tuesday 20 Oct.
+      const b = await reminderFromEmail(ctx, "remind me about the gasfurnace inspection the day before", "gasfurnace inspection", () => {}, stub({ found: false, source: 1, task: "", due: "" }));
+      expect(b.reply).toMatch(/^Added to your reminders: “Gasfurnace inspection”/);
+      expect(b.reply).toMatch(/due Tue 20 Oct/);
+      expect(b.reply).toMatch(/Mon 19 Oct at 09:00/);
+    } finally {
+      delete MAIL.m10;
+      delete MAIL.m11;
+    }
   });
 
   it("turns the actions found in this week's mail into reminders", async () => {

@@ -240,7 +240,7 @@ function DashboardInner() {
       {navOpen && <div className="fixed inset-0 z-20 bg-black/30 md:hidden" onClick={() => setNavOpen(false)} aria-hidden />}
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-10 flex items-center gap-3 border-b border-line bg-bg/90 px-4 py-3 backdrop-blur md:px-8">
+        <header className="sticky top-0 z-10 flex flex-wrap items-center gap-3 border-b border-line bg-bg/90 px-4 py-3 backdrop-blur md:flex-nowrap md:px-8">
           <button className="rounded-lg border border-line px-2 py-1 text-sm md:hidden" onClick={() => setNavOpen(true)} aria-label="Open navigation">
             ☰
           </button>

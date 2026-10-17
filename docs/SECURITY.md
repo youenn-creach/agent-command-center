@@ -50,6 +50,14 @@ These layers are independent, so no single bug or tampered row is enough:
 6. **Approval + cap:** each draft needs approval of its exact text, at most 20 drafts a day, and nothing is ever sent.
 7. **Build-breaking tests:** a source scan fails the test suite if a Gmail send/modify/trash/delete or a Calendar write endpoint appears anywhere in the code, and only the Google connector may talk to Google at all.
 
+## Optional cloud help for understanding requests (off by default)
+
+When the owner turns it on (Settings), the typed Ctrl+K request and the fixed skill list are sent to Mistral's API
+(api.mistral.ai, EU) to choose a skill. Nothing else is sent: no email, note, calendar entry, draft or answer, and the self-check
+stays local. The API key is sealed with the app's AES-GCM key (like OAuth tokens) and never returned by any API. The feature is
+off in the demo instance, capped per day, and falls back to the local model on any error (a rate-limit, quota, payment or key
+error also pauses it until the next day). The destination URL is fixed in code.
+
 ## Known limitations (deliberate, documented)
 
 - **No user login.** The app assumes one person per OS account and listens on 127.0.0.1 only. Anyone who can run code as your OS user can read the database and the token key. Exposing the app on a network requires real authentication first.

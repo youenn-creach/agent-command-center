@@ -1,3 +1,6 @@
+import { correctWeekdayDate } from "./eventParse";
+import { config } from "../config";
+import { AUTOMATED } from "../connectors/google";
 import { z } from "zod";
 import { type Ctx } from "../db";
 import { logActivity } from "../activity";
@@ -35,7 +38,7 @@ export const Verdict = z.object({
 });
 export type Verdict = z.infer<typeof Verdict>;
 
-const VERDICT_SCHEMA = {
+export const VERDICT_SCHEMA = {
   type: "object",
   properties: {
     needs_action: { type: "boolean" },
@@ -47,7 +50,7 @@ const VERDICT_SCHEMA = {
   required: ["needs_action", "action", "due", "priority", "worth_knowing"],
 };
 
-const REVIEW_SYSTEM = [
+export const REVIEW_SYSTEM = [
   "You help the user triage their email. Read ONE email and decide whether the user personally needs to do something because of it:",
   "reply or answer a question, pay a bill or fee, sign or approve something, confirm or book, provide a document or information, attend or prepare for something, or act before a deadline.",
   "NOT actions: newsletters, marketing, receipts and confirmations that need nothing more, automatic notifications, FYI messages, replies that close a conversation.",
@@ -83,14 +86,23 @@ const SECURITY = /\b(security|breach|hack|compromis|password|unauthori[sz]ed|dat
 
 /** The latest explicit date in a text ("2026-10-13", "13 October 2026", "October 13, 2026", "13/10/2026"), if any. */
 export function latestDate(text: string): Date | null {
+  const valid = foundDates(text);
+  return valid.length ? new Date(Math.max(...valid.map((d) => d.getTime()))) : null;
+}
+
+/** Every distinct explicit date in a text, as "YYYY-MM-DD" (same formats as latestDate). */
+export function allDates(text: string): string[] {
+  return [...new Set(foundDates(text).map((d) => d.toISOString().slice(0, 10)))];
+}
+
+function foundDates(text: string): Date[] {
   const found: Date[] = [];
   for (const m of text.matchAll(/\b(\d{4})-(\d{2})-(\d{2})\b/g)) found.push(new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])));
   for (const m of text.matchAll(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/g)) found.push(new Date(Date.UTC(+m[3], +m[2] - 1, +m[1])));
   const month = `(${MONTHS.map((x) => x.slice(0, 3)).join("|")})[a-z]*\\.?`;
   for (const m of text.matchAll(new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)? ${month},? (\\d{4})\\b`, "gi"))) found.push(new Date(Date.UTC(+m[3], MONTHS.findIndex((x) => x.startsWith(m[2].toLowerCase())), +m[1])));
   for (const m of text.matchAll(new RegExp(`\\b${month} (\\d{1,2})(?:st|nd|rd|th)?,? (\\d{4})\\b`, "gi"))) found.push(new Date(Date.UTC(+m[3], MONTHS.findIndex((x) => x.startsWith(m[1].toLowerCase())), +m[2])));
-  const valid = found.filter((d) => !Number.isNaN(d.getTime()));
-  return valid.length ? new Date(Math.max(...valid.map((d) => d.getTime()))) : null;
+  return found.filter((d) => !Number.isNaN(d.getTime()));
 }
 
 /** "Worth knowing" about something already over (a cancelled appointment last week) is noise; a security notice about a past incident isn't. */
@@ -166,6 +178,15 @@ export async function reviewInbox(ctx: Ctx, days: number, progress: (s: string) 
         temperature: 0,
       });
       const v = Verdict.parse(JSON.parse(out.text));
+      // A person asked the user a question ("which one do you prefer?") and the model saw nothing to do: that needs a reply.
+      // Not for automated senders or newsletters (their "Questions? Contact us" asks nothing of the user).
+      if (!v.needs_action && folder !== "in:spam" && !AUTOMATED.test(m.sender) && /\?(?:\s|$)/.test(text.slice(0, 1500))) {
+        const name = m.sender.replace(/\s*<[^>]*>/, "").replace(/"/g, "").trim() || "them";
+        v.needs_action = true;
+        v.action = `Reply to ${name} about “${m.subject.slice(0, 80)}”`;
+      }
+      // "next Tuesday" in the email: the weekday it names beats the model's arithmetic.
+      v.due = correctWeekdayDate(v.due.trim(), `${m.subject}\n${text}`, m.date.slice(0, 10), ctx.now(), config().timezone);
       reviewed.push({ sender: m.sender, subject: m.subject, date: m.date, verdict: isStale(v, ctx.now()) ? { ...v, worth_knowing: "" } : v });
     } catch (err) {
       failed++;

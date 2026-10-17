@@ -13,6 +13,8 @@ import path from "node:path";
  *   npm run app:status
  *   npm run demo:install    a second, demo-only instance on http://127.0.0.1:3001 (own data in data/demo)
  *   npm run demo:uninstall
+ *   npm run guard:install   the memory guard: unloads the local models before memory runs out (scripts/memory-guard.mjs)
+ *   npm run guard:uninstall
  *
  * For the personal app, set ACC_MODE=personal and ACC_PEER_URL=http://127.0.0.1:3001 in .env.local.
  * The demo unit sets its own ACC_MODE=demo (process env wins over .env.local), so Google stays off there.
@@ -23,6 +25,7 @@ import path from "node:path";
 const UNIT = "agent-command-center-web.service";
 const WORKER = "agent-command-center-worker.service";
 const DEMO = "agent-command-center-demo.service";
+const GUARD = "acc-memory-guard.service";
 const unitDir = path.join(homedir(), ".config", "systemd", "user");
 const unitPath = path.join(unitDir, UNIT);
 const project = process.cwd();
@@ -107,11 +110,43 @@ WantedBy=default.target
   rmSync(path.join(unitDir, DEMO), { force: true });
   systemctl("daemon-reload");
   console.log(`Removed ${DEMO}. Its data stays in data/demo.`);
+} else if (mode === "guard-install") {
+  const unit = `[Unit]
+Description=Agent Command Center memory guard (unloads the local models before memory runs out)
+
+[Service]
+Type=simple
+WorkingDirectory=${project}
+ExecStart=${process.execPath} ${path.join(project, "scripts", "memory-guard.mjs")}
+Restart=always
+RestartSec=5
+MemoryMax=150M
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
+`;
+  mkdirSync(unitDir, { recursive: true });
+  writeFileSync(path.join(unitDir, GUARD), unit);
+  systemctl("daemon-reload");
+  systemctl("enable", "--now", GUARD);
+  if (isActive(GUARD)) systemctl("restart", GUARD);
+  console.log(`\nInstalled and started ${GUARD}. Events: data/memory-guard.log · journalctl --user -u acc-memory-guard -f`);
+} else if (mode === "guard-uninstall") {
+  try {
+    systemctl("disable", "--now", GUARD);
+  } catch {
+    // not installed
+  }
+  rmSync(path.join(unitDir, GUARD), { force: true });
+  systemctl("daemon-reload");
+  console.log(`Removed ${GUARD}.`);
 } else if (mode === "deploy") {
   build();
   if (isActive(UNIT) || existsSync(unitPath)) systemctl("restart", UNIT);
   if (isActive(WORKER)) systemctl("restart", WORKER);
   if (isActive(DEMO)) systemctl("restart", DEMO);
+  if (isActive(GUARD)) systemctl("restart", GUARD);
   console.log("Rebuilt and restarted.");
 } else if (mode === "uninstall") {
   try {
@@ -129,6 +164,6 @@ WantedBy=default.target
     // inactive: systemctl already printed why
   }
 } else {
-  console.log("Usage: tsx scripts/app-service.mts install|deploy|uninstall|status|demo-install|demo-uninstall");
+  console.log("Usage: tsx scripts/app-service.mts install|deploy|uninstall|status|demo-install|demo-uninstall|guard-install|guard-uninstall");
   process.exit(1);
 }

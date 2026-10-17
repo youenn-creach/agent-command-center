@@ -57,7 +57,8 @@ describe("source scan", () => {
 
   it("only the Google connector talks to Google APIs", () => {
     const talking = files.filter((f) => /googleapis\.com/.test(readFileSync(f, "utf8"))).map((f) => f.replaceAll("\\", "/"));
-    expect(talking).toEqual(["src/server/connectors/google.ts"]);
+    // scripts/sim-gmail.ts is a FAKE Gmail for the simulations: it answers calls aimed at Google and never makes one.
+    expect(talking.filter((f) => f !== "scripts/sim-gmail.ts")).toEqual(["src/server/connectors/google.ts"]);
   });
 
   it("no Gmail send/modify/trash/delete or Calendar write endpoint appears anywhere in the code", () => {

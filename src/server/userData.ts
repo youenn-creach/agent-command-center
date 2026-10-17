@@ -11,11 +11,12 @@ export function exportUserData(ctx: Ctx) {
     activity: all(ctx.db, "SELECT ts, actor, kind, agent_id, service_id, summary, outcome FROM activity ORDER BY id"),
     aboutMe: all(ctx.db, "SELECT text, created_at, updated_at FROM memory_facts ORDER BY created_at"),
     requests: all(ctx.db, "SELECT text, intent, reply, created_at FROM requests ORDER BY created_at"),
+    corrections: all(ctx.db, "SELECT text, wrong, chosen, created_at FROM route_corrections ORDER BY created_at"),
   };
 }
 
 /**
- * Deletes user-added documents (and their local vectors), About me facts, request and search history,
+ * Deletes user-added documents (and their local vectors), About me facts, request and search history, corrections,
  * and the activity log. Notes shared to Atlas are removed there first; if that fails, nothing is cleared.
  */
 export async function clearUserData(ctx: Ctx) {
@@ -25,6 +26,7 @@ export async function clearUserData(ctx: Ctx) {
     run(ctx.db, "DELETE FROM retrieval_runs");
     run(ctx.db, "DELETE FROM activity");
     run(ctx.db, "DELETE FROM requests");
+    run(ctx.db, "DELETE FROM route_corrections");
     run(ctx.db, "DELETE FROM memory_facts");
   });
   logActivity(ctx, { actor: "user", kind: "system", outcome: "info", summary: "Cleared user-added documents, About me, request history, search history and activity log" });

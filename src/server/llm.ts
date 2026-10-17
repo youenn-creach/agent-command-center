@@ -5,9 +5,10 @@ import { withTimeout } from "./tools/budget";
 import { beginLlmCall, unloadModel } from "./llmRuntime";
 
 /**
- * LLM provider interface. The default — and the only one in this build — is a local Ollama model.
- * There is deliberately no hosted fallback: if the local model is unavailable, callers get a clear
- * error and fall back to non-LLM output, rather than data silently leaving the machine.
+ * LLM provider interface. The default is a local Ollama model, and there is deliberately no hosted fallback: if the local model
+ * is unavailable, callers get a clear error and fall back to non-LLM output, rather than data silently leaving the machine.
+ * One opt-in exception, off by default: cloud help for UNDERSTANDING requests (src/server/cloudRouter.ts, Mistral API, free tier
+ * only), which sends the typed request wording and the skill list, never mail, notes or calendar data.
  *
  * The LLM never receives tools. It turns already-authorized, already-retrieved data into text.
  */
