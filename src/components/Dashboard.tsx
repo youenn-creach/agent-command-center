@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { DashboardState } from "@/server/state";
 import { Badge, cx, SimpleModeProvider, ToastProvider, useToast } from "./ui";
 import { ModelIcon, NavIcon, ServiceIcon, ServiceStatus, StatusLight } from "./icons";
-import { agentLight, relative, stepLabel } from "./api";
+import { agentLight, post, relative, stepLabel } from "./api";
 import { TodayView } from "./sections/Today";
 import { ActionQueueView } from "./sections/ActionQueue";
 import { AgentsView } from "./sections/Agents";
@@ -247,6 +247,7 @@ function DashboardInner() {
           <h1 className="hidden text-sm font-medium text-muted lg:block">{SECTIONS.find((s) => s.id === section)?.label}</h1>
           <CommandBar go={go} refresh={refresh} />
           <div className="ml-auto flex flex-wrap items-center gap-2">
+            {state && <AutopilotSwitch state={state} refresh={refresh} />}
             <ThemeToggle />
             {state?.config.mode === "personal" ? (
               <Badge tone="ok" title="Your own accounts only. Demo services and fictional data are hidden here.">Personal</Badge>
@@ -328,3 +329,30 @@ function RuntimeModels({ state, simple, onOpen }: { state: DashboardState; simpl
     </>
   );
 }
+
+/** The kill switch: shown when autopilot is on for any kind; one click returns everything to "Ask first". */
+function AutopilotSwitch({ state, refresh }: { state: DashboardState; refresh: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const a = state.autopilot;
+  if (!Object.values(a.kinds).some(Boolean)) return null;
+  const toggle = async () => {
+    setBusy(true);
+    try {
+      await post("/api/settings", { op: "autopilot", paused: !a.paused });
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <button
+      onClick={toggle}
+      disabled={busy}
+      title={a.paused ? "Autopilot is paused: everything asks first. Click to resume." : "Autopilot is on for some kinds. Click to pause it: everything asks first."}
+      className={a.paused ? "rounded-full border border-warn px-2 py-0.5 text-[11px] font-medium text-warn" : "rounded-full border border-accent px-2 py-0.5 text-[11px] font-medium text-accent"}
+    >
+      {a.paused ? "Autopilot paused · Resume" : "Autopilot on · Pause"}
+    </button>
+  );
+}
+

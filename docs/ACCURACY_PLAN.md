@@ -60,12 +60,13 @@ Measured on the local Mistral 8B, every request graded automatically, held-out s
 |---|---|---|---|
 | Baseline (2026-10-15) | 15% | 32% | — |
 | Fixes + example library | 4% | 25% | 17% |
-| + abilities from v1's held-out failures | 1% | 3% (then tuned on) | **15%** |
+| + abilities from v1's held-out failures | 1% | 3% (then tuned on) | 15% |
+| + review fixes, autopilot, routing nets (2026-10-17) | — | — | **10%** (54/60) |
 
 Kept: the example library (196 labelled requests + the user's own corrections, nearest 6 shown to the router), the
 abilities in Phase C's spirit (calendar questions answered from the events, event-anchored reminders, mail-first amounts and
 dates, topic follow-ups), "Understood as … · Not right?" (Phase D2). Measured and turned off: restating the goal (no gain,
-18% slower), model-based splitting (no gain, 26% slower), the self-check (no fix seen, at least four answers made worse,
-30-50 s per request). Not built: voting, the planner fallback, the mistakes log beyond corrections, typing suggestions.
+18% slower), model-based splitting (no gain, 26% slower), the self-check (measured on v2, same code: 52/60 on vs 54/60 off, 2 answers
+made worse, none fixed, +31 s per request; the two v1 requests it had rescued are now routed directly). Not built: voting, the planner fallback, the mistakes log beyond corrections, typing suggestions.
 Why stopped: the last rounds removed 10-22% of the remaining held-out errors, under the owner's 30% bar; corrections from
 real use are expected to help more from here.

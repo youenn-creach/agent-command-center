@@ -202,6 +202,7 @@ export function CommandBar({ go, refresh }: { go: Go; refresh: () => Promise<voi
                 )}
               </span>
             )}
+            {"intent" in result && result.auto && result.ref?.actionId && <UndoButton actionId={result.ref.actionId} refresh={refresh} />}
             {"intent" in result && result.section && (
               <Button onClick={() => { go(result.section!); setResult(null); }}>Open</Button>
             )}
@@ -212,6 +213,33 @@ export function CommandBar({ go, refresh }: { go: Go; refresh: () => Promise<voi
         </div>
       )}
     </div>
+  );
+}
+
+/** Undo right under an answer autopilot acted on (the same Undo as in "Done for you" on Today). */
+function UndoButton({ actionId, refresh }: { actionId: string; refresh: () => Promise<void> }) {
+  const [state, setState] = useState<{ busy: boolean; done?: string; error?: string }>({ busy: false });
+  if (state.done) return <span className="text-xs text-ok" role="status">{state.done}</span>;
+  return (
+    <>
+      {state.error && <span className="text-xs text-danger" role="alert">{state.error}</span>}
+      <Button
+        variant="ghost"
+        busy={state.busy}
+        onClick={async () => {
+          setState({ busy: true });
+          try {
+            const out = await post<{ summary: string }>("/api/actions", { op: "undo", type: "action", id: actionId });
+            setState({ busy: false, done: out.summary });
+            await refresh();
+          } catch (e) {
+            setState({ busy: false, error: (e as Error).message });
+          }
+        }}
+      >
+        Undo
+      </Button>
+    </>
   );
 }
 

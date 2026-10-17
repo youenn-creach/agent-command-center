@@ -30,9 +30,20 @@ describe("Google request allowlist (the only requests a token may make)", () => 
     ["gmail", "POST", "https://gmail.googleapis.com/gmail/v1/users/me/messages/batchDelete"],
     ["gmail", "GET", "https://gmail.googleapis.com/gmail/v1/users/me/settings/forwardingAddresses"],
     ["gmail", "GET", "https://gmail.googleapis.com/gmail/v1/users/other@example.com/messages"],
-    // drafts token can't read, update or delete drafts either
+    // drafts token can't read or update drafts, and can delete only one draft by id (Undo of autopilot)
     ["gmail-drafts", "GET", "https://gmail.googleapis.com/gmail/v1/users/me/drafts"],
     ["gmail-drafts", "GET", "https://gmail.googleapis.com/gmail/v1/users/me/messages"],
+    ["gmail-drafts", "DELETE", "https://gmail.googleapis.com/gmail/v1/users/me/drafts"],
+    ["gmail-drafts", "DELETE", "https://gmail.googleapis.com/gmail/v1/users/me/messages/abc"],
+    ["gmail-drafts", "PUT", "https://gmail.googleapis.com/gmail/v1/users/me/drafts/abc"],
+    ["gmail", "DELETE", "https://gmail.googleapis.com/gmail/v1/users/me/messages/abc"],
+    ["gmail", "DELETE", "https://gmail.googleapis.com/gmail/v1/users/me/drafts/abc"],
+    // deleting in calendars: never the main calendar, never a calendar itself, never an event id the app didn't make
+    ["google-calendar", "DELETE", "https://www.googleapis.com/calendar/v3/calendars/primary/events/0123456789abcdef0123456789abcdef"],
+    ["google-calendar-app", "DELETE", "https://www.googleapis.com/calendar/v3/calendars/primary/events/0123456789abcdef0123456789abcdef"],
+    ["google-calendar-app", "DELETE", "https://www.googleapis.com/calendar/v3/calendars/acc%40group.calendar.google.com"],
+    ["google-calendar-app", "DELETE", "https://www.googleapis.com/calendar/v3/calendars/acc%40group.calendar.google.com/events/someone-elses-event"],
+    ["google-calendar-app", "PATCH", "https://www.googleapis.com/calendar/v3/calendars/acc%40group.calendar.google.com/events/0123456789abcdef0123456789abcdef"],
     // calendar writes
     ["google-calendar", "POST", "https://www.googleapis.com/calendar/v3/calendars/primary/events"],
     ["google-calendar", "GET", "https://www.googleapis.com/calendar/v3/calendars/primary/events/abc"],
@@ -59,6 +70,16 @@ describe("source scan", () => {
     const talking = files.filter((f) => /googleapis\.com/.test(readFileSync(f, "utf8"))).map((f) => f.replaceAll("\\", "/"));
     // scripts/sim-gmail.ts is a FAKE Gmail for the simulations: it answers calls aimed at Google and never makes one.
     expect(talking.filter((f) => f !== "scripts/sim-gmail.ts")).toEqual(["src/server/connectors/google.ts"]);
+  });
+
+  it("deleting at Google exists only for Undo of autopilot: two calls, both in the Google connector", () => {
+    const deletes = files.flatMap((f) => [...readFileSync(f, "utf8").matchAll(/"DELETE"/g)].map(() => f.replaceAll("\\", "/")));
+    // Calls (not the allowlist or the type of authedRequest): exactly the two Undo functions.
+    expect(deletes.filter((f) => f !== "src/server/connectors/google.ts")).toEqual([]);
+    const google = readFileSync("src/server/connectors/google.ts", "utf8");
+    expect([...google.matchAll(/await authedRequest\([^)]*"DELETE"/g)].length).toBe(2);
+    expect(google).toMatch(/export async function deleteAppCalendarEvent/);
+    expect(google).toMatch(/export async function deleteGmailDraft/);
   });
 
   it("no Gmail send/modify/trash/delete or Calendar write endpoint appears anywhere in the code", () => {

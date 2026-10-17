@@ -27,14 +27,14 @@ export function RemindersCard({ reminders, refresh, onEmpty }: { reminders: Remi
   }
 
   return (
-    <Card title={`Reminders${open.length ? ` (${open.length})` : ""}`} subtitle="Approved from the Action Queue">
+    <Card title={`Reminders${open.length ? ` (${open.length})` : ""}`} subtitle="Yours (“remind me…” in the prompt bar) and the ones you approved from the agents">
       {reminders.length === 0 ? (
         <Empty title="No reminders">
-          Agents propose reminders;{" "}
+          Ask “remind me to … tomorrow at 9” in the prompt bar, or{" "}
           <button className="underline" onClick={onEmpty}>
-            approve one
-          </button>{" "}
-          to see it here.
+            approve one an agent proposed
+          </button>
+          .
         </Empty>
       ) : (
         <ul className="space-y-1.5">

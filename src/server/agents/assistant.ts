@@ -14,6 +14,7 @@ import { nanoModelInstalled } from "../retrieval/embeddings";
 import { check } from "../policy/engine";
 import { addReminder, listReminders } from "../reminders";
 import { InsightError, proposeNudge } from "../insights";
+import { autoRun, draftFacts } from "../autopilot";
 import { correctWeekdayDate, weekdayAfter, eventOn, localToday, parseEventRequest, zonedToUtc, type PreparedEvent } from "./eventParse";
 import type { WebResult } from "../connectors/websearch";
 import { parseRange } from "./when";
@@ -398,7 +399,7 @@ export async function agenda(ctx: Ctx, text: string): Promise<SkillAnswer> {
 type CalEvent = { title: string; starts_at: string; ends_at: string; location: string | null };
 
 /** The user's events between two instants (Google Calendar when connected, the demo calendar when shown). */
-async function eventsBetween(ctx: Ctx, from: Date, to: Date): Promise<{ events: CalEvent[] } | SkillAnswer> {
+export async function eventsBetween(ctx: Ctx, from: Date, to: Date): Promise<{ events: CalEvent[] } | SkillAnswer> {
   const range = { from, to };
   const google = isConnected(ctx, "google-calendar");
   const demo = !serviceHidden(ctx, "demo-calendar");
@@ -451,7 +452,10 @@ export async function namedEventAnswer(ctx: Ctx, text: string): Promise<SkillAns
   }
   if ("reply" in got) return null;
   const titleWords = (t: string) => new Set(t.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean).map(stem));
+  // "Where is spanish class on thursday": only that day's (or period's) events when one is named.
+  const asked = /\b(?:today|tonight|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this week(?:end)?|next week|weekend)\b/i.test(text) && !/\btoday or tomorrow|tomorrow or today\b/i.test(text) ? parseRange(text, ctx.now(), tz()) : null;
   const hits = got.events.filter((e) => {
+    if (asked && !(Date.parse(e.starts_at) < asked.to.getTime() && Date.parse(e.ends_at) > asked.from.getTime())) return false;
     const tw = titleWords(`${e.title} ${e.location ?? ""}`);
     const shared = words.filter((w) => tw.has(w)).length;
     return shared > 0 && shared >= Math.ceil(words.length / 2);
@@ -501,12 +505,14 @@ function freeAtAnswer(text: string, events: CalEvent[], dayStart: Date): SkillAn
   if (minutes === null) return null;
   const at = zonedToUtc(localToday(dayStart, tz()), minutes, tz()).getTime();
   const end = at + 30 * 60_000;
-  const busy = events.filter((e) => Date.parse(e.starts_at) < end && Date.parse(e.ends_at) > at);
+  // All-day entries (a birthday, a holiday marker) don't make a given hour busy.
+  const timed = events.filter((e) => Date.parse(e.ends_at) - Date.parse(e.starts_at) < 20 * 3_600_000);
+  const busy = timed.filter((e) => Date.parse(e.starts_at) < end && Date.parse(e.ends_at) > at);
   const day = dayLabel(new Date(at).toISOString());
   const time = hm(new Date(at).toISOString());
   if (busy.length) return { reply: `No: at ${time} on ${day} you have “${busy[0].title}” (${hm(busy[0].starts_at)}–${hm(busy[0].ends_at)}).`, section: "today" };
-  const before = events.filter((e) => Date.parse(e.ends_at) <= at).at(-1);
-  const after = events.find((e) => Date.parse(e.starts_at) >= end);
+  const before = timed.filter((e) => Date.parse(e.ends_at) <= at).at(-1);
+  const after = timed.find((e) => Date.parse(e.starts_at) >= end);
   return { reply: `Yes: you're free at ${time} on ${day}${before || after ? ` (${before ? `after “${before.title}” ends at ${hm(before.ends_at)}` : ""}${before && after ? "; " : ""}${after ? `next is “${after.title}” at ${hm(after.starts_at)}` : ""})` : ": nothing else that day"}.`, section: "today" };
 }
 
@@ -632,6 +638,12 @@ export async function nudge(ctx: Ctx, who: string): Promise<SkillAnswer> {
     const { actionId, existing } = await proposeNudge(ctx, match.thread_id);
     const to = match.recipient.replace(/\s*<[^>]*>/, "");
     if (existing) return { reply: `A follow-up to ${to} about “${match.subject}” is already waiting for your approval in the Action Queue, so I didn't draft a second one.`, actionId, section: "actions" };
+    // Autopilot: a follow-up the owner asked for by name ("nudge Tom") may go to Gmail Drafts without a click.
+    const address = parseSender(match.recipient).email;
+    if (address) {
+      const auto = await autoRun(ctx, actionId, "typed", draftFacts(ctx, who, address, parseSender(match.recipient).name ?? null));
+      if (auto.auto) return { reply: `Done for you: a follow-up to ${to} about “${match.subject}” is in your Gmail Drafts (never sent; you send it). Undo it under “Done for you” on Today.`, actionId, section: "today" };
+    }
     return { reply: `Drafted a follow-up to ${to} about “${match.subject}”. Review it in the Action Queue; nothing is sent until you approve it.`, actionId, section: "actions" };
   } catch (err) {
     if (err instanceof InsightError) return { reply: err.message, section: "permissions" };
@@ -804,7 +816,8 @@ export function groundNumbers(answer: string, sources: string): string {
     return !bad;
   });
   if (!dropped) return answer;
-  if (!kept.join("").trim()) return "I couldn't find that stated in the sources.";
+  // Nothing left but citations or punctuation ("[1]"): say so, never show an empty answer.
+  if (!kept.join(" ").replace(/\[\d+(?:\s*[,\]\[]\s*\d+)*\]/g, "").replace(/[\s.,;:!?•*-]/g, "")) return "I couldn't confirm the details from the sources: they're listed below.";
   return `${kept.join(" ").replace(/\s+•/g, "\n•").trim()} (I left out a figure I couldn't find in the sources.)`;
 }
 
@@ -970,7 +983,9 @@ async function extractEvent(ctx: Ctx, text: string, docs: SourceDoc[], items: Sk
   let date = realDay(f.date);
   // The model found no date, but an email names one weekday ("next Tuesday") and maybe a window ("between 9 and 12"): use them.
   if (!f.found || !date) {
-    const mail = docs.find((d) => /^Date sent: \d{4}-\d{2}-\d{2}/m.test(d.body) && weekdayAfter(d.body, d.body.match(/^Date sent: (\d{4}-\d{2}-\d{2})/m)![1]));
+    // Only a mail about the event asked for: it shares a main word with the request ("boiler" for "the boiler inspection").
+    const asked = searchWords(text).toLowerCase().split(/\s+/).filter((w) => w.length >= 4);
+    const mail = docs.find((d) => /^Date sent: \d{4}-\d{2}-\d{2}/m.test(d.body) && asked.some((w) => `${d.title} ${d.body}`.toLowerCase().includes(w)) && weekdayAfter(d.body, d.body.match(/^Date sent: (\d{4}-\d{2}-\d{2})/m)![1]));
     if (mail) {
       const sentOn = mail.body.match(/^Date sent: (\d{4}-\d{2}-\d{2})/m)![1];
       const window = mail.body.match(/\b(?:between|from)\s+(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\s*(?:and|to|-|–)\s*(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?/i);
@@ -1213,7 +1228,8 @@ export async function draftReplyFree(ctx: Ctx, who: string, message: string, pro
   }
   const msg = rows[0];
   // No mail from them, but the user is waiting on their answer ("can you write to priya"): that is a follow-up.
-  if (!msg && all<{ n: number }>(ctx.db, `SELECT 1 AS n FROM waiting_on WHERE lower(recipient) LIKE ?${demoRowsFilter()}`, `%${name.toLowerCase()}%`).length) return nudge(ctx, name);
+  const waitedOn = (n: string) => n.length >= 3 && all<{ recipient: string }>(ctx.db, `SELECT recipient FROM waiting_on WHERE 1 = 1${demoRowsFilter()}`).some((w) => new RegExp(`(?<![\\p{L}])${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}])`, "iu").test(w.recipient));
+  if (!msg && waitedOn(name)) return nudge(ctx, name);
   if (!msg) return { reply: `I couldn't find a personal email from “${who}” in the last 90 days to reply to (newsletters and mailing lists don't count). I can only reply to an email I can find: say “reply to <name> that …”.` };
   const { name: senderName, email } = parseSender(msg.sender);
   if (!email) return { reply: "I couldn't read that sender's address." };
@@ -1241,6 +1257,12 @@ export async function draftReplyFree(ctx: Ctx, who: string, message: string, pro
       },
       new RunBudget(1, 5000),
     );
+    // Autopilot: only when the owner said what to answer ("reply to Ana that Thursday works"); a reply the model writes from
+    // the other person's mail alone ("what should I reply to the landlord") counts as coming from that mail, so it waits.
+    const auto = message.trim() && !aiDirected ? await autoRun(ctx, out.actionId, "typed", draftFacts(ctx, `${who} ${message}`, email, senderName ?? null)) : { auto: false as const, why: "" };
+    if (auto.auto) {
+      return { reply: `Done for you: a reply to ${senderName ?? email} about “${msg.subject}” is in your Gmail Drafts (never sent; you send it). Undo it under “Done for you” on Today.`, items: [{ title: subject, detail: written.reply }], actionId: out.actionId, section: "today" };
+    }
     return {
       reply: `Drafted a reply to ${senderName ?? email} about “${msg.subject}”${aiDirected ? " (from your words only: that email contained instructions aimed at an AI)" : ""}. Review it in the Action Queue; once approved it lands in your Gmail Drafts, never sent automatically.`,
       items: [{ title: subject, detail: written.reply }],

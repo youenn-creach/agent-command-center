@@ -45,10 +45,22 @@ These layers are independent, so no single bug or tampered row is enough:
 2. **Code-level read-only cap:** Gmail, Calendar, Weather, notes and news are capped at Read in the policy engine, whatever the database says.
    Role profiles narrow this further: only the Inbox and Follow-up agents can ever read Gmail, and only the Calendar agent can read Google Calendar.
 3. **No write action kinds:** "send email" can only target the demo inbox, and real Gmail can only receive an approved *draft*. "Create event" can target the demo calendar or the app's **own** calendar (a separate `calendar.app.created` connection), never your main calendar.
-4. **Request allowlist:** every token-carrying request passes one function with an exact method, host and path allowlist per connection. Gmail and Calendar may only `GET` messages and events. Gmail drafts may only `POST /gmail/v1/users/me/drafts`; even `/drafts/send` is refused.
+4. **Request allowlist:** every token-carrying request passes one function with an exact method, host and path allowlist per connection. Gmail and Calendar may only `GET` messages and events. Gmail drafts may only `POST /gmail/v1/users/me/drafts`; even `/drafts/send` is refused. For Undo of autopilot only, two deletes exist: one Gmail draft by the id Gmail returned when the app created it, and one event in the app's own calendar by the id the app derived from its action (32 hex characters). Nothing else can be deleted, and tests pin both the allowlist and the two call sites.
 5. **Scope re-check:** before any token is used, its stored scopes must exactly match the expected grant.
 6. **Approval + cap:** each draft needs approval of its exact text, at most 20 drafts a day, and nothing is ever sent.
 7. **Build-breaking tests:** a source scan fails the test suite if a Gmail send/modify/trash/delete or a Calendar write endpoint appears anywhere in the code, and only the Google connector may talk to Google at all.
+
+## Autopilot (off by default)
+
+Per kind, the owner may let the app act without a click: calendar events (app calendar) and Gmail drafts (never sent) that the
+owner asked for in their own words. The decision is one pure function, `mayAutoRun` (src/server/autopilot.ts), table-tested
+against docs/AUTOPILOT_SECURITY_TESTS.md: anything derived from email or web text always waits; sending, deleting, paying,
+webhooks and permission changes are never automatic; ambiguous times, events more than 60 days away or longer than 12 hours,
+and drafts to an address not in the owner's mail wait; at most 3 automatic actions an hour and 10 a day (counted from the
+actions themselves, so a restart doesn't reset it). An automatic action is approved as "autopilot" through the same permission
+check as a click, so it can never exceed an agent's level. A pause switch in the header returns everything to "Ask first";
+every automatic action is in the activity log and in "Done for you" with Undo. Settings change only from the Settings page,
+never from a request's words.
 
 ## Optional cloud help for understanding requests (off by default)
 

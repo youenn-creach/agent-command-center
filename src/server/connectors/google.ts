@@ -210,7 +210,7 @@ async function accessToken(ctx: Ctx, serviceId: GoogleServiceId, fetcher: Fetche
  * The ONLY requests a token may ever make, per connection. Exact method + path; anything else —
  * send, modify, trash, delete, insert, patch, settings, another user — is refused before a token
  * is attached. Calendar and read-only Gmail can only GET; Gmail drafts can only create a draft
- * (exact path, so not even POST /drafts/send).
+ * (exact path, so not even POST /drafts/send) and delete one draft by id (Undo of autopilot).
  */
 const ALLOWED_REQUESTS: Record<GoogleServiceId, { method: string; host: string; path: RegExp }[]> = {
   gmail: [
@@ -219,7 +219,11 @@ const ALLOWED_REQUESTS: Record<GoogleServiceId, { method: string; host: string; 
     { method: "GET", host: "gmail.googleapis.com", path: /^\/gmail\/v1\/users\/me\/threads\/[\w-]{1,64}$/ },
   ],
   "google-calendar": [{ method: "GET", host: "www.googleapis.com", path: /^\/calendar\/v3\/calendars\/primary\/events$/ }],
-  "gmail-drafts": [{ method: "POST", host: "gmail.googleapis.com", path: /^\/gmail\/v1\/users\/me\/drafts$/ }],
+  "gmail-drafts": [
+    { method: "POST", host: "gmail.googleapis.com", path: /^\/gmail\/v1\/users\/me\/drafts$/ },
+    // Undo of an autopilot draft: deletes that one draft (by the id Gmail returned when the app created it). Never a sent message.
+    { method: "DELETE", host: "gmail.googleapis.com", path: /^\/gmail\/v1\/users\/me\/drafts\/[\w-]{1,64}$/ },
+  ],
   // Create the app's own calendar once, then insert events into it. Never "primary", no reads,
   // updates or deletes (and the scope itself only reaches calendars the app created).
   "google-calendar-app": [
@@ -227,6 +231,8 @@ const ALLOWED_REQUESTS: Record<GoogleServiceId, { method: string; host: string; 
     // Only a secondary calendar id (xxxx@group.calendar.google.com). Your primary calendar's id is your
     // email address, so a looser pattern would let a tampered setting point at it.
     { method: "POST", host: "www.googleapis.com", path: /^\/calendar\/v3\/calendars\/[\w.-]{1,100}%40group\.calendar\.google\.com\/events$/ },
+    // Undo of an autopilot event: deletes that one event in the app calendar (ids the app made: 32 hex characters).
+    { method: "DELETE", host: "www.googleapis.com", path: /^\/calendar\/v3\/calendars\/[\w.-]{1,100}%40group\.calendar\.google\.com\/events\/[0-9a-f]{32}$/ },
   ],
 };
 
@@ -237,7 +243,7 @@ export function assertAllowedGoogleRequest(serviceId: GoogleServiceId, method: s
 }
 
 /** Every request that carries a Google token goes through here: allowlist and scope check first. */
-async function authedRequest(ctx: Ctx, serviceId: GoogleServiceId, method: "GET" | "POST", url: string, fetcher: Fetcher, body?: string): Promise<Response> {
+async function authedRequest(ctx: Ctx, serviceId: GoogleServiceId, method: "GET" | "POST" | "DELETE", url: string, fetcher: Fetcher, body?: string): Promise<Response> {
   assertAllowedGoogleRequest(serviceId, method, url);
   // Re-check the stored grant: a tampered row (e.g. broader scopes) is never used.
   const row = one<{ scopes: string }>(ctx.db, "SELECT scopes FROM oauth_connections WHERE service_id = ?", serviceId);
@@ -653,3 +659,21 @@ export async function createAppCalendarEvent(ctx: Ctx, e: AppEventInput, fetcher
   }
   throw new GoogleError("The app calendar could not be found or recreated", "API");
 }
+
+/** Undo of an autopilot event: removes that event from the app calendar (and the local copy). 404/410 = already gone. */
+export async function deleteAppCalendarEvent(ctx: Ctx, idempotencyId: string, fetcher: Fetcher = fetch): Promise<void> {
+  const calendarId = getSetting(ctx.db, "gcal.app.calendarId");
+  if (!calendarId || !APP_CALENDAR_ID.test(calendarId)) throw new GoogleError("The app calendar isn't set up", "API");
+  const eventId = createHash("sha256").update(idempotencyId).digest("hex").slice(0, 32);
+  const res = await authedRequest(ctx, "google-calendar-app", "DELETE", `${CALENDAR_API}/${encodeURIComponent(calendarId)}/events/${eventId}`, fetcher);
+  if (!res.ok && res.status !== 404 && res.status !== 410) throw new GoogleError(`Google Calendar refused to remove the event (HTTP ${res.status})`, "API");
+  run(ctx.db, "DELETE FROM events WHERE id = ?", `gca_${eventId}`);
+}
+
+/** Undo of an autopilot draft: deletes that draft from Gmail Drafts. 404 = already gone (sent or deleted by you). */
+export async function deleteGmailDraft(ctx: Ctx, draftId: string, fetcher: Fetcher = fetch): Promise<void> {
+  if (!/^[\w-]{1,64}$/.test(draftId)) throw new GoogleError("Unexpected draft id", "API");
+  const res = await authedRequest(ctx, "gmail-drafts", "DELETE", `https://gmail.googleapis.com/gmail/v1/users/me/drafts/${draftId}`, fetcher);
+  if (!res.ok && res.status !== 404) throw new GoogleError(`Gmail refused to remove the draft (HTTP ${res.status})`, "API");
+}
+

@@ -4,6 +4,7 @@ import { judgeAnswer, selfCheckOn } from "./selfcheck";
 import { modelSplit, modelSplitOn } from "./split";
 import { CHOICE_SKILLS, recordCorrection } from "./corrections";
 import { cloudRouter } from "../cloudRouter";
+import { autoRun, draftFacts, eventFacts } from "../autopilot";
 import { all, type Ctx } from "../db";
 import { logActivity } from "../activity";
 import { listJobs, startRunNow, type WorkflowRegistry } from "../scheduler/scheduler";
@@ -16,7 +17,7 @@ import { parseSender } from "./chiefOfStaff";
 import { nanoModelInstalled } from "../retrieval/embeddings";
 import type { EventRow } from "../tools/registry";
 import { config } from "../config";
-import { parseEventRequest, type PreparedEvent } from "./eventParse";
+import { localToday, parseEventRequest, zonedToUtc, type PreparedEvent } from "./eventParse";
 import { addFact, listFacts } from "../memory";
 import { findFreeSlots, formatSlots, workingHoursFromFacts } from "./slots";
 import { recordRequest } from "../requests";
@@ -27,7 +28,7 @@ import { APP_CALENDAR_NAME } from "../connectors/google";
 import { calendarMode } from "../calendarMode";
 import { alreadyInCalendar, flightEvent, flightKey, upcomingFlights } from "./flights";
 import { checkInReminder, deadlinesToReminders, reminderAtEvent, reminderBeforeEvent, nudgeAll, prepDay, reminderFromEmail, tripWeather } from "./chains";
-import { agenda, CAN_DO_SHORT, draftReplyFree, emailQuestion, findEventInEmail, findEventOnWeb, webAnswer, emailSearch, meetingPrep, notesAnswer, contactLookup, notesLikely, nudge, priorities, remindersList, quickRoute, reminderFromText, routeRequest, searchWords, subscriptions, trips, waitingOn, weatherAnswer, clarify, type Route, type Skill, type SkillAnswer } from "./assistant";
+import { eventsBetween, agenda, CAN_DO_SHORT, draftReplyFree, emailQuestion, findEventInEmail, findEventOnWeb, webAnswer, emailSearch, meetingPrep, notesAnswer, contactLookup, notesLikely, nudge, priorities, remindersList, quickRoute, reminderFromText, routeRequest, searchWords, subscriptions, trips, waitingOn, weatherAnswer, clarify, type Route, type Skill, type SkillAnswer } from "./assistant";
 import { reviewInbox } from "./inboxReview";
 import type { LlmProvider } from "../llm";
 import { finishRequest, setRequestProgress } from "../requests";
@@ -72,6 +73,8 @@ export interface CommandResult {
   understood?: string;
   /** The skill that answered, when one did (offered with alternatives under the answer: "not right?"). */
   skill?: string;
+  /** Autopilot did it without a click (the action is in "Done for you" on Today, with Undo). */
+  auto?: boolean;
 }
 
 const CALENDAR_WORD = /\b(calendar|calendrier|calendario|calendari|agenda)\b/i;
@@ -187,7 +190,9 @@ async function proposeSlots(ctx: Ctx, who: string, durationMin: number, nextWeek
       },
       new RunBudget(1, 5000),
     );
-    return { intent, ref: { actionId: out.actionId }, reply: `Drafted a reply to ${name ?? email} with these times. Review it in the Action Queue${real ? "; once approved it lands in your Gmail Drafts" : ""}.`, items, section: "actions" };
+    const auto = await autoRun(ctx, out.actionId, "typed", draftFacts(ctx, `${who} ${name ?? ""}`, email, name));
+    if (auto.auto) return { intent, ref: { actionId: out.actionId }, auto: true, reply: `Done for you: a reply to ${name ?? email} with these times is in your Gmail Drafts (never sent). Undo it under “Done for you” on Today.`, items, section: "today" };
+    return { intent, ref: { actionId: out.actionId }, reply: `Drafted a reply to ${name ?? email} with these times. Review it in the Action Queue${real ? "; once approved it lands in your Gmail Drafts" : ""}.${autopilotNote(ctx, auto.why)}`, items, section: "actions" };
   } catch (err) {
     if ((err as { code?: string }).code === "POLICY_DENIED") return { intent, reply: "Here are your free slots. The Follow-up agent isn't allowed to draft the reply, so copy them:", items, section: "permissions" };
     throw err;
@@ -306,6 +311,11 @@ async function proposeEvent(ctx: Ctx, prepared: PreparedEvent): Promise<{ approv
     if ((err as { code?: string }).code === "POLICY_DENIED") return { why: " (The Calendar agent needs Write with approval on the app calendar to add it itself.)" };
     throw err;
   }
+}
+
+/** When the owner has autopilot on for something and it still waits, one short reason (nothing when autopilot is off). */
+function autopilotNote(ctx: Ctx, why: string): string {
+  return /off for this kind|always waits/.test(why) ? "" : ` (Autopilot didn't add it on its own: ${why}.)`;
 }
 
 /** "Find the race in my email and add it to my calendar": the event from the mail, proposed like any other. */
@@ -463,14 +473,16 @@ async function withSelfCheck(ctx: Ctx, text: string, result: CommandResult, work
   const compound = /two requests/.test(result.understood ?? "");
   const retry = async (answer: SkillAnswer, progress: (s: string) => void): Promise<SkillAnswer | CommandResult | null> => {
     progress("Checking the answer…");
-    const v = await judgeAnswer(ctx, text, result.intent, answer, checker);
-    if (v.ok || compound || !v.skill || v.skill === result.intent || v.skill === "unsupported") return null;
+    // The skill that answered (a skill name like the checker's), not the app intent ("draft", "notes").
+    const used = result.skill ?? result.intent;
+    const v = await judgeAnswer(ctx, text, used, answer, checker);
+    if (v.ok || compound || !v.skill || v.skill === used || v.skill === "unsupported") return null;
     // An action the wording asked for (a nudge, a draft, a reminder, an event) is never traded for a read-only answer:
     // the action is already prepared, and the read-only reply would contradict it (held-out batch 9, "nudge priya and tom").
-    if (ACTING_SKILLS.has(result.intent) && !ACTING_SKILLS.has(v.skill)) return null;
+    if (ACTING_SKILLS.has(used) && !ACTING_SKILLS.has(v.skill)) return null;
     // ...and a question is never turned into an action: "what's on my tax checklist" once became three reminders from the mail.
-    if (!ACTING_SKILLS.has(result.intent) && ACTING_SKILLS.has(v.skill)) return null;
-    logActivity(ctx, { actor: "chief_of_staff", kind: "agent_run", agentId: "chief_of_staff", outcome: "info", summary: `Self-check: “${result.intent}” missed (${v.missing.slice(0, 80)}); retried as “${v.skill}”` });
+    if (!ACTING_SKILLS.has(used) && ACTING_SKILLS.has(v.skill)) return null;
+    logActivity(ctx, { actor: "chief_of_staff", kind: "agent_run", agentId: "chief_of_staff", outcome: "info", summary: `Self-check: “${used}” missed (${v.missing.slice(0, 80)}); retried as “${v.skill}”` });
     progress(`Trying again with ${v.skill}…`);
     return runSkill(ctx, text, { skill: v.skill, args: {} }, workflows);
   };
@@ -547,23 +559,24 @@ async function handle(ctx: Ctx, text: string, workflows: WorkflowRegistry, llm?:
   // Only quick rules that read the whole two-part sentence ("find a free hour … and email Marc to propose it") stop the split;
   // a rule that matches the first half only ("what's on my calendar tomorrow and remind me …") must not.
   const whole = quickRoute(text);
+  // The people the user deals with: read once per request (a 200-message scan), for the splitter and the router.
+  let people: string[] | undefined;
+  const peopleOnce = () => (people ??= knownPeople(ctx));
   let split: [string, string] | null = null;
   if (!(whole && ["propose_times", "unsupported", "nudge", "contact_lookup", "reminders_list"].includes(whole.skill))) {
     // The model's reading first when switched on (phase B); the wording rules when it is off or can't say.
     const read = modelSplitOn(ctx) ? await modelSplit(ctx, text, llm) : null;
-    split = read === "one" ? null : (read ?? splitAsks(text, knownPeople(ctx)));
+    split = read === "one" ? null : (read ?? splitAsks(text, peopleOnce()));
   }
   if (split) return handleCompound(ctx, split, workflows, llm);
   const fast = classify(text);
   if (EXACT.has(fast.intent)) return { ...(await runIntent(ctx, text, fast, workflows)), understood: "exact command" };
-  const quick = quickRoute(text);
-  if (quick) return { ...(await runSkill(ctx, text, quick, workflows)), skill: quick.skill, understood: "quick rule (no model needed)" };
+  if (whole) return { ...(await runSkill(ctx, text, whole, workflows)), skill: whole.skill, understood: "quick rule (no model needed)" };
   let route: Awaited<ReturnType<typeof routeRequest>>;
   try {
     // Optional cloud help for understanding (Mistral API, free tier, request wording only): any failure falls back to the local model.
     const cloud = llm ? null : cloudRouter(ctx);
-    const people = knownPeople(ctx);
-    route = cloud ? await routeRequest(ctx, text, cloud, people).catch(() => routeRequest(ctx, text, llm, people)) : await routeRequest(ctx, text, llm, people);
+    route = cloud ? await routeRequest(ctx, text, cloud, peopleOnce()).catch(() => routeRequest(ctx, text, llm, peopleOnce())) : await routeRequest(ctx, text, llm, peopleOnce());
   } catch (err) {
     // No local model: fall back to keywords, and say so rather than guessing silently.
     const r = await runIntent(ctx, text, fast, workflows);
@@ -586,7 +599,7 @@ const MONEY_OR_DATE = /\b(?:how much|cost|costs|price|amount|owe|pay|paid|premiu
 
 // A request to put something in the calendar, and a day or time for it.
 const ADD_EVENT_SHAPE = /^\s*(?:please\s+)?(?:can you\s+|could you\s+)?(?:add|put|schedule|book|block|pencil in|create|set up)\b/i;
-const WHEN_GIVEN = /\b(?:today|tonight|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next week|the \d{1,2}(?:st|nd|rd|th)?|\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}:\d{2}|noon|midday)\b/i;
+const WHEN_GIVEN = /\b(?:today|tonight|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next week|the \d{1,2}(?:st|nd|rd|th)?|\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}:\d{2}|at \d{1,2}|in (?:\d{1,2}|a|one|two|three|four|five|six) (?:days?|weeks?|months?)|noon|midday)\b/i;
 
 // "Find X in my email and add it to my calendar" is one request; the model sometimes picks one half.
 const MAIL_WORD = /\b(e-?mails?|mail|inbox|gmail)\b/i;
@@ -600,8 +613,13 @@ const SELF_REMINDER = /\b(remind (?:me|myself)|don'?t let me forget|set (?:a|me 
 export function correctRoute(text: string, route: Route): Route {
   // "Add dinner with Laura saturday 8pm at Casa Pepe": a calendar entry with a person in it, not a message to them.
   if ((route.skill === "draft_reply" || route.skill === "reply_and_add" || route.skill === "propose_times") && ADD_EVENT_SHAPE.test(text) && WHEN_GIVEN.test(text) && !/\b(?:reply|answer|respond|tell|let .{1,30} know|e-?mail|message|text|write|confirm|accept|decline)\b/i.test(text)) return { skill: "add_event", args: {} };
+  // "Add dentist follow-up in two weeks at 10": "add" with a day or time and no reminder word is an event, not a to-do.
+  if (route.skill === "reminder" && ADD_EVENT_SHAPE.test(text) && WHEN_GIVEN.test(text) && !/\b(?:remind\w*|to-?dos?|tasks?|don'?t let me forget)\b/i.test(text)) return { skill: "add_event", args: {} };
+  // "Remind me the day before my flight to check in": a request that starts with "remind me" is a reminder for the user.
+  if ((route.skill === "event_from_email" || route.skill === "add_event" || route.skill === "add_flights") && /^\s*(?:please\s+)?(?:can you\s+)?remind me\b/i.test(text) && !TO_CALENDAR.test(text)) return { skill: "reminder", args: {} };
   // "What grammar am I working on in spanish": a question about the user themselves is in their notes, not on the web.
-  if (route.skill === "web_search" && /\b(?:am i|do i|did i|have i|was i|i'?m|i am|i was|my)\b/i.test(text) && !/\b(?:weather|news|price|prices|score|result|results|open|opening|hours|near me|nearby|calendar|agenda|remind\w*)\b/i.test(text)) return { skill: "notes_search", args: { query: searchWords(text) } };
+  // Not how-to or travel questions ("how do I renew my passport", "how far is my hotel from the airport"): the web answers those.
+  if (route.skill === "web_search" && /\b(?:am i|do i|did i|have i|was i|i'?m|i am|i was|my)\b/i.test(text) && !/\b(?:weather|news|price|prices|score|result|results|open|opening|hours|near me|nearby|calendar|agenda|remind\w*|far|distance|route|directions?|airport|station|hotel|address)\b|^\s*how (?:do|can|should|would) i\b|\bhow to\b/i.test(text)) return { skill: "notes_search", args: { query: searchWords(text) } };
   // "Add the book club for next friday at 7pm": a day and a clock time are given, so it is a new event, not one to find in the mail.
   if (route.skill === "event_from_email" && !MAIL_WORD.test(text) && WHEN_GIVEN.test(text) && /\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|\b\d{1,2}:\d{2}\b|\bat \d{1,2}\b/i.test(text)) return { skill: "add_event", args: {} };
   // "Do I have plans on saturday": the calendar (and what the mail says about that day), not who owes a reply.
@@ -968,7 +986,9 @@ async function runIntent(ctx: Ctx, text: string, routed: { intent: Intent; query
         }
         throw err;
       }
-      return { intent, ref: { actionId: proposed.actionId }, reply: `Proposed a Gmail draft to ${email}. Review it in the Action Queue; once approved it appears in your Gmail Drafts — it is never sent automatically.`, section: "actions" };
+      const auto = await autoRun(ctx, proposed.actionId, "typed", draftFacts(ctx, text, email, name));
+      if (auto.auto) return { intent, ref: { actionId: proposed.actionId }, auto: true, reply: `Done for you: a draft to ${email} is in your Gmail Drafts (never sent; you send it). Undo it under “Done for you” on Today.`, section: "today" };
+      return { intent, ref: { actionId: proposed.actionId }, reply: `Proposed a Gmail draft to ${email}. Review it in the Action Queue; once approved it appears in your Gmail Drafts — it is never sent automatically.${autopilotNote(ctx, auto.why)}`, section: "actions" };
     }
     case "briefing":
       return startWorkflow(ctx, "daily_briefing", "morning briefing", workflows);
@@ -1044,7 +1064,15 @@ async function runIntent(ctx: Ctx, text: string, routed: { intent: Intent; query
       };
       if (calendarMode(ctx) === "link") return manual();
       const proposed = await proposeEvent(ctx, prepared);
-      if ("approval" in proposed) return { intent, ref: { actionId: proposed.approval.actionId }, event: prepared, approval: proposed.approval, reply: `Ready to add to your “${proposed.approval.calendar}” calendar. Approve it here or in the Action Queue.` };
+      if ("approval" in proposed) {
+        // Autopilot (off unless the owner turned it on for events): an event the owner typed may be added without a click.
+        const tzName = config().timezone;
+        const day = localToday(new Date(prepared.startsAt), tzName);
+        const sameDay = await eventsBetween(ctx, zonedToUtc(day, 0, tzName), zonedToUtc(day, 24 * 60, tzName)).catch(() => null);
+        const auto = await autoRun(ctx, proposed.approval.actionId, "typed", eventFacts(text, prepared.startsAt, prepared.endsAt, sameDay && "events" in sameDay ? sameDay.events.length : 99));
+        if (auto.auto) return { intent, ref: { actionId: proposed.approval.actionId }, event: prepared, auto: true, reply: `Done for you: added to your “${proposed.approval.calendar}” calendar. Undo it under “Done for you” on Today.`, section: "today" };
+        return { intent, ref: { actionId: proposed.approval.actionId }, event: prepared, approval: proposed.approval, reply: `Ready to add to your “${proposed.approval.calendar}” calendar. Approve it here or in the Action Queue.${autopilotNote(ctx, auto.why)}` };
+      }
       return manual(proposed.why);
     }
     case "flights":

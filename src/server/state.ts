@@ -11,6 +11,7 @@ import { listFacts } from "./memory";
 import { listRequests } from "./requests";
 import { systemResources } from "./resources";
 import { cloudRouterStatus } from "./cloudRouter";
+import { autopilotStatus, doneForYou } from "./autopilot";
 import { listInsights } from "./insights";
 import { impactSummary } from "./impact";
 import { NOTIFY_KINDS, NOTIFY_LABELS, notificationSettings } from "./notify";
@@ -118,6 +119,7 @@ export async function dashboardState(ctx: Ctx) {
     },
     health: { ollama },
     cloudRouter: cloudRouterStatus(ctx),
+    autopilot: { ...autopilotStatus(ctx), done: doneForYou(ctx, 20) },
     resources: await systemResources(activeLlmCalls(ctx).length > 0 || ollama.running && listRequests(ctx).some((r) => r.state === "working")),
     today: {
       events: all<EventRow>(ctx.db, `SELECT * FROM events WHERE starts_at >= ? AND starts_at < ?${demoRowsFilter()} ORDER BY starts_at`, dayStart.toISOString(), dayEnd.toISOString()),

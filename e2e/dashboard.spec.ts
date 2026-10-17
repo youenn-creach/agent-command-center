@@ -148,7 +148,7 @@ test("the request board keeps each answer: open a request to read it", async ({ 
   // No local model in this test instance: the request is matched by keywords, and says so.
   await page.getByLabel("Ask your Chief of Staff").fill("what's waiting for my approval?");
   await page.getByLabel("Ask your Chief of Staff").press("Enter");
-  await expect(page.getByText(/Understood by keywords/)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/by keywords \(local model unavailable\)/)).toBeVisible({ timeout: 30_000 });
   await page.keyboard.press("Escape");
   const board = page.locator("section").filter({ hasText: "Your requests" });
   await board.getByRole("button", { name: /what's waiting for my approval/ }).click();

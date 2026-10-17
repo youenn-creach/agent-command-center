@@ -74,4 +74,11 @@ describe("baseline v1 fixes", () => {
     expect(correctRoute("give me a quick rundown of tomorrow", { skill: "prep_day", args: {} }).skill).toBe("agenda");
     expect(correctRoute("prep me for tomorrow's meetings", { skill: "prep_day", args: {} }).skill).toBe("prep_day");
   });
+
+  it("'add … at 10' is an event; a request starting 'remind me' is a reminder (the self-check used to rescue these)", () => {
+    expect(correctRoute("add dentist follow-up in two weeks at 10", { skill: "reminder", args: {} }).skill).toBe("add_event");
+    expect(correctRoute("add a reminder for monday to send the invoice", { skill: "reminder", args: {} }).skill).toBe("reminder");
+    expect(correctRoute("remind me the day before my flight to check in", { skill: "event_from_email", args: {} }).skill).toBe("reminder");
+    expect(correctRoute("find the concert in my email and add it to my calendar", { skill: "event_from_email", args: {} }).skill).toBe("event_from_email");
+  });
 });

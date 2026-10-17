@@ -246,6 +246,15 @@ export const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 21,
+    description: "Autopilot: where an action's content came from, what it created outside (for Undo), and when it was undone",
+    sql: `
+      ALTER TABLE actions ADD COLUMN origin TEXT;
+      ALTER TABLE actions ADD COLUMN external_ref TEXT;
+      ALTER TABLE actions ADD COLUMN undone_at TEXT;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.at(-1)?.version ?? 1;

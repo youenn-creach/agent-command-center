@@ -7,6 +7,7 @@ import { useState } from "react";
 import type { SectionProps, Go } from "../Dashboard";
 import { Badge, Button, Card, Empty, SectionHeader, Technical, useToast } from "../ui";
 import { RemindersCard } from "../Reminders";
+import { DoneForYouCard } from "../DoneForYou";
 import { ImpactCard } from "../Impact";
 import { fmtTime, post, relative } from "../api";
 import { ServiceStatus } from "../icons";
@@ -41,7 +42,7 @@ export function TodayView({ state, refresh, go }: SectionProps & { go: Go }) {
     <div>
       <SectionHeader
         title={new Date().toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" })}
-        description="Your day at a glance. Agents prepare; you decide. Nothing leaves this machine without your explicit approval."
+        description={`Your day at a glance. Agents prepare; you decide. Nothing leaves this machine without your explicit approval${Object.values(state.autopilot.kinds).some(Boolean) ? ", except what you put on autopilot (listed under Done for you)" : ""}.`}
       />
       <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3">
         <Stat label="Waiting for your approval" value={pending.length} tone={pending.length ? "accent" : "neutral"} onClick={() => go("actions")} />
@@ -95,6 +96,7 @@ export function TodayView({ state, refresh, go }: SectionProps & { go: Go }) {
         </Card>
         <div className="space-y-4">
           <RunningNow state={state} />
+          <DoneForYouCard done={state.autopilot.done} refresh={refresh} />
           <RemindersCard reminders={state.today.reminders} refresh={refresh} onEmpty={() => go("actions")} />
           <RequestsCard requests={state.requests} go={go} />
           {state.today.weekly && (

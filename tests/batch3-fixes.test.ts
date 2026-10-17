@@ -332,7 +332,9 @@ import { groundNumbers, plainAnswer } from "@/server/agents/assistant";
 describe("figures in answers must be in the sources", () => {
   const mail = "Subject: Your car insurance renews on 1 December 2026. Your car insurance policy renews on 1 December 2026. The renewal price is 412 EUR.";
   it("drops an invented figure and says so", () => {
-    expect(groundNumbers("The premium goes up by 78 EUR from 334 EUR to 412 EUR [1].", mail)).toBe("I couldn't find that stated in the sources.");
+    expect(groundNumbers("The premium goes up by 78 EUR from 334 EUR to 412 EUR [1].", mail)).toBe("I couldn't confirm the details from the sources: they're listed below.");
+    // A sentence with an unknown figure next to a bare citation: never an answer that is only "[1]".
+    expect(groundNumbers("Maria asks if you can bring 13 maps. [1]", "Bring the map, leaving at 8am")).toBe("I couldn't confirm the details from the sources: they're listed below.");
     expect(groundNumbers("The renewal costs 412 EUR [1]. It was 334 EUR last year.", mail)).toBe("The renewal costs 412 EUR [1]. (I left out a figure I couldn't find in the sources.)");
   });
   it("keeps grounded figures, reformatted ones, dates and citations", () => {

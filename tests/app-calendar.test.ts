@@ -139,3 +139,48 @@ describe("app calendar (calendar.app.created)", () => {
     ).toThrow();
   });
 });
+
+import { appCalendarConnector } from "@/server/approvals";
+import { undoDone } from "@/server/autopilot";
+
+describe("Undo of an autopilot event in the app calendar", () => {
+  async function autopilotEvent() {
+    const { ctx, g } = await connectedApp();
+    let deleteStatus = 204;
+    const deletes: string[] = [];
+    const fetcher: Fetcher = async (url, init) => {
+      if (init?.method === "DELETE") {
+        deletes.push(url);
+        await new Promise((r) => setTimeout(r, 5)); // Google takes a moment: two clicks overlap
+        return new Response(null, { status: deleteStatus });
+      }
+      return g.fetcher(url, init);
+    };
+    const p = proposeAction(ctx, { agentId: "calendar", serviceId: "google-calendar-app", kind: "calendar_event", title: "Calendar: Dentist", payload: { calendar: "Agent Command Center", title: "Dentist", startsAt: event.startsAt, endsAt: event.endsAt }, idempotencyKey: "auto-1" });
+    approveAction(ctx, p.id, p.payload_hash, "autopilot");
+    await executeAction(ctx, p.id, appCalendarConnector(ctx, fetcher));
+    return { ctx, id: p.id, fetcher, deletes, setDelete: (s: number) => (deleteStatus = s) };
+  }
+
+  it("two Undo clicks at once delete the event once, at the exact path of the event the app made", async () => {
+    const { ctx, id, fetcher, deletes } = await autopilotEvent();
+    const out = await Promise.all([undoDone(ctx, "action", id, fetcher), undoDone(ctx, "action", id, fetcher)]);
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]).toMatch(/\/calendars\/acc123%40group\.calendar\.google\.com\/events\/[0-9a-f]{32}$/);
+    expect(out.map((o) => o.summary).filter((s) => s === "Already undone.")).toHaveLength(1);
+  });
+
+  it("if Google refuses, nothing is marked undone and Undo can be tried again", async () => {
+    const { ctx, id, fetcher, setDelete } = await autopilotEvent();
+    setDelete(500);
+    await expect(undoDone(ctx, "action", id, fetcher)).rejects.toThrow(/refused to remove/);
+    expect(getActionUndone(ctx, id)).toBeNull();
+    setDelete(204);
+    await undoDone(ctx, "action", id, fetcher);
+    expect(getActionUndone(ctx, id)).toBeTruthy();
+  });
+});
+
+function getActionUndone(ctx: { db: Parameters<typeof import("@/server/db").one>[0] }, id: string) {
+  return (ctx.db.prepare("SELECT undone_at FROM actions WHERE id = ?").get(id) as { undone_at: string | null }).undone_at;
+}

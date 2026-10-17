@@ -235,6 +235,7 @@ export function SettingsView({ state, refresh }: SectionProps) {
         <AutomationsCard state={state} refresh={refresh} />
 
         <CalendarModeCard state={state} refresh={refresh} />
+        <AutopilotCard state={state} refresh={refresh} />
         <CloudRouterCard state={state} refresh={refresh} />
 
         <NotificationsCard state={state} refresh={refresh} />
@@ -680,3 +681,51 @@ function CloudRouterCard({ state, refresh }: SectionProps) {
     </Card>
   );
 }
+
+/** Autopilot: per kind, "Ask first" (default) or "Do it, tell me after", plus the pause switch. Only from this page. */
+function AutopilotCard({ state, refresh }: SectionProps) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const a = state.autopilot;
+  const save = async (body: Record<string, unknown>, done: string) => {
+    setBusy(true);
+    try {
+      await post("/api/settings", { op: "autopilot", ...body });
+      toast(done, "ok");
+      await refresh();
+    } catch (e) {
+      toast((e as Error).message, "danger");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const kinds: { kind: "calendar_event" | "email_draft"; label: string; detail: string }[] = [
+    { kind: "calendar_event", label: "Calendar events you ask for", detail: "Added to the app's own calendar (“add dentist friday 3pm”). Not events found in emails or on the web." },
+    { kind: "email_draft", label: "Gmail drafts you ask for", detail: "Placed in Gmail Drafts, never sent: you send them. Only to someone you name, from your own mail, with what you said to answer." },
+  ];
+  return (
+    <Card title="Autopilot" subtitle="Off by default: everything asks first. Turned on, the kinds below are done without your click and listed under “Done for you” on Today, with Undo.">
+      <div className="space-y-3">
+        {kinds.map((k) => (
+          <label key={k.kind} className="flex items-start gap-2 text-sm">
+            <input type="checkbox" className="mt-1" checked={a.kinds[k.kind]} disabled={busy} onChange={(e) => save({ kind: k.kind, enabled: e.target.checked }, `${k.label}: ${e.target.checked ? "do it, tell me after" : "ask first"}`)} />
+            <span>
+              <span className="font-medium">{k.label}</span>
+              <span className="block text-xs text-muted">{k.detail}</span>
+            </span>
+          </label>
+        ))}
+      </div>
+      <p className="mt-3 rounded-md bg-panel-2 px-2.5 py-2 text-xs text-muted">
+        Always asks first: anything taken from an email or a web page, anything that sends, deletes, pays or changes access, a time that could mean two things (“at 9”), events more than 60 days away or longer than 12 hours. At most {a.perHour} automatic actions an hour and {a.perDay} a day (used: {a.lastHour} this hour, {a.lastDay} today). Reminders you ask for are added at once, as always.
+      </p>
+      <div className="mt-3 flex items-center gap-2">
+        <Button variant={a.paused ? "primary" : "ghost"} busy={busy} onClick={() => save({ paused: !a.paused }, a.paused ? "Autopilot resumed" : "Autopilot paused: everything asks first")}>
+          {a.paused ? "Resume autopilot" : "Pause autopilot"}
+        </Button>
+        {a.paused && <span className="text-xs text-warn">Paused: everything asks first.</span>}
+      </div>
+    </Card>
+  );
+}
+

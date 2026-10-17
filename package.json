@@ -22,7 +22,7 @@
     "worker:status": "tsx scripts/worker-service.mts status",
     "db:backup": "tsx scripts/backup.mts",
     "db:restore": "tsx scripts/backup.mts restore",
-    "test:e2e": "playwright test",
+    "test:e2e": "npm run build:e2e && playwright test",
     "app:install": "tsx scripts/app-service.mts install",
     "app:deploy": "tsx scripts/app-service.mts deploy",
     "app:uninstall": "tsx scripts/app-service.mts uninstall",

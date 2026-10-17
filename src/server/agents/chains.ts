@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { all, one, type Ctx } from "../db";
 import { config } from "../config";
-import { demoRowsFilter, serviceHidden } from "../mode";
+import { demoRowsFilter } from "../mode";
 import { callTool } from "../tools/registry";
 import { RunBudget } from "../tools/budget";
 import { fenceUntrusted, localLlm, UNTRUSTED_DATA_RULES, type LlmProvider } from "../llm";
@@ -10,7 +10,7 @@ import { InsightError, proposeNudge } from "../insights";
 import { correctWeekdayDate, weekdayAfter, localToday, parseEventRequest, zonedToUtc, type Ymd } from "./eventParse";
 import { upcomingFlights } from "./flights";
 import { allDates, reviewInbox } from "./inboxReview";
-import { agenda, looserQueries, meetingPrep, readMatches, realDay, refreshScan, skippedNote, widenQuery, type SkillAnswer } from "./assistant";
+import { agenda, eventsBetween, looserQueries, meetingPrep, readMatches, realDay, refreshScan, skippedNote, widenQuery, type SkillAnswer } from "./assistant";
 import { parseSender } from "./chiefOfStaff";
 
 /**
@@ -316,7 +316,7 @@ export async function reminderAtEvent(ctx: Ctx, text: string): Promise<SkillAnsw
   const m = text.match(/\b(the\s+(?:morning|evening|night|day)\s+(?:of|before)|before|after)\s+(?:the\s+|my\s+)?([\p{L}][\p{L}' -]{2,40}?)(?=\s+(?:to|that|so)\b|[,.!?]|$)/iu);
   if (!m) return null;
   const how = m[1].toLowerCase().replace(/\s+/g, " ");
-  const stop = /^(?:the|my|a|an|it|its|this|that|next|due|deadline|appointment|event|meeting|today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|noon|midday|lunch|dinner)$/i;
+  const stop = /^(?:the|my|a|an|it|its|this|that|next|due|deadline|appointment|event|meeting|today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|noon|midday|lunch|dinner|weekend|week|month|end)$/i;
   const words = m[2].toLowerCase().split(/[^\p{L}]+/u).filter((w) => w.length > 3 && !stop.test(w));
   if (!words.length) return null;
   const task = (text.slice((m.index ?? 0) + m[0].length).replace(/^\s*(?:to|that|so)\s+/i, "").replace(/[.!?]+$/, "").trim() || text.replace(/^\s*remind me\s*/i, "")).replace(/^\w/, (c) => c.toUpperCase());
@@ -328,7 +328,7 @@ export async function reminderAtEvent(ctx: Ctx, text: string): Promise<SkillAnsw
   let start: Date | null = null;
   let end: Date | null = null;
   try {
-    const events = (await agendaEvents(ctx, zonedToUtc(today, 0, tzName), 60)) as { title: string; starts_at: string; ends_at?: string }[];
+    const events = await agendaEvents(ctx, zonedToUtc(today, 0, tzName), 60);
     const hit = events.sort((a, b) => a.starts_at.localeCompare(b.starts_at)).find((e) => Date.parse(e.starts_at) > ctx.now().getTime() - 3_600_000 && words.some((w) => e.title.toLowerCase().includes(w)));
     if (hit) {
       title = hit.title;
@@ -341,8 +341,9 @@ export async function reminderAtEvent(ctx: Ctx, text: string): Promise<SkillAnsw
   }
   // Then the mail: a recent message about it whose text gives the day ("next Tuesday", "on 20 October").
   if (!day) {
-    const msgs = all<{ subject: string; snippet: string; received_at: string }>(ctx.db, `SELECT subject, snippet, received_at FROM messages WHERE 1 = 1${demoRowsFilter()} ORDER BY received_at DESC LIMIT 200`);
-    const msg = msgs.find((x) => words.every((w) => `${x.subject} ${x.snippet}`.toLowerCase().includes(w))) ?? msgs.find((x) => words.some((w) => x.subject.toLowerCase().includes(w)));
+    // Every word of the event in the message, and not a newsletter ("weekend" alone would match "Your weekend reading").
+    const msgs = all<{ sender: string; subject: string; snippet: string; received_at: string }>(ctx.db, `SELECT sender, subject, snippet, received_at FROM messages WHERE 1 = 1${demoRowsFilter()} ORDER BY received_at DESC LIMIT 200`);
+    const msg = msgs.find((x) => !/\b(?:newsletter|news|no-?reply|marketing|promo\w*|deals?|updates?)\b/i.test(x.sender) && words.every((w) => `${x.subject} ${x.snippet}`.toLowerCase().includes(w)));
     if (!msg) return null;
     const mailText = `${msg.subject} ${msg.snippet}`;
     const iso = weekdayAfter(mailText, msg.received_at.slice(0, 10)) ?? (() => {
@@ -355,7 +356,6 @@ export async function reminderAtEvent(ctx: Ctx, text: string): Promise<SkillAnsw
     title = msg.subject.replace(/\s+next\s+\w+day\b|\s+(?:on|this)\s+\w+day\b/i, "").trim() || msg.subject;
   }
   let due: Date;
-  let label: string;
   if (how === "the morning of") {
     const eight = zonedToUtc(day, 8 * 60, tzName);
     due = start && start.getTime() <= eight.getTime() ? new Date(start.getTime() - 3_600_000) : eight;
@@ -365,18 +365,13 @@ export async function reminderAtEvent(ctx: Ctx, text: string): Promise<SkillAnsw
   // Before it: an hour before it starts; when the time isn't known, the evening before (never on the day itself, too late).
   else due = start ? new Date(start.getTime() - 3_600_000) : zonedToUtc(addDays(day, -1), 18 * 60, tzName);
   if (due.getTime() <= ctx.now().getTime()) return { reply: `“${title}” is ${dayName(day)}: ${how} it has already passed, so I didn't set a reminder.`, section: "today" };
-  label = `${dayName(localToday(due, tzName))} at ${due.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: tzName })}`;
+  const label = `${dayName(localToday(due, tzName))} at ${due.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: tzName })}`;
   const added = remindOnce(ctx, `${task} (${how} ${title}, ${dayName(day)})`, due.toISOString());
   return { reply: `${added ? "Added to your reminders" : "Already in your reminders"}: “${task}”, ${how} “${title}” (${dayName(day)}). I'll remind you ${label}.`, section: "today" };
 }
 
-/** Calendar events from `from` for `days` days: Google if connected, and the demo calendar where it is part of the app. */
-async function agendaEvents(ctx: Ctx, from: Date, days: number): Promise<{ title: string; starts_at: string }[]> {
-  const to = new Date(from.getTime() + days * 86_400_000);
-  const out: { title: string; starts_at: string }[] = [];
-  if (one(ctx.db, "SELECT 1 FROM services WHERE id = 'google-calendar' AND connection_state = 'connected'")) {
-    out.push(...(await callTool(ctx, "calendar", "gcal.range", { from: from.toISOString(), to: to.toISOString() }, new RunBudget(1, 30_000))));
-  }
-  if (!serviceHidden(ctx, "demo-calendar")) out.push(...(await callTool(ctx, "calendar", "calendar.list_events", { from: from.toISOString(), days: Math.min(days, 14) }, new RunBudget(1, 5000))));
-  return out;
+/** Calendar events from `from` for `days` days (the same read as the calendar answers: Google if connected, the demo calendar when shown). */
+async function agendaEvents(ctx: Ctx, from: Date, days: number): Promise<{ title: string; starts_at: string; ends_at: string }[]> {
+  const got = await eventsBetween(ctx, from, new Date(from.getTime() + days * 86_400_000));
+  return "events" in got ? got.events : [];
 }

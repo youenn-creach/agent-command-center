@@ -99,6 +99,8 @@ export interface ActionRow {
   approved_at: string | null;
   approved_hash: string | null;
   executed_at: string | null;
+  external_ref?: string | null;
+  undone_at?: string | null;
   result: string | null;
   is_demo: number;
   created_at: string;
@@ -292,8 +294,8 @@ export function approveAction(ctx: Ctx, id: string, expectedHash: string, approv
 }
 
 export interface Connector {
-  /** Performs the effect. Must be safe to call once per action id. */
-  execute(action: ActionRow): { effect: string; simulated: boolean } | Promise<{ effect: string; simulated: boolean }>;
+  /** Performs the effect. Must be safe to call once per action id. `ref`: what it created outside (a Gmail draft id), for Undo. */
+  execute(action: ActionRow): { effect: string; simulated: boolean; ref?: string } | Promise<{ effect: string; simulated: boolean; ref?: string }>;
 }
 
 /** The only connectors in the MVP: they write to a local outbox table and nowhere else. */
@@ -344,8 +346,8 @@ export const webhookConnector = (ctx: Ctx, fetcher?: WebhookFetcher): Connector 
 export const gmailDraftConnector = (ctx: Ctx, fetcher?: Fetcher): Connector => ({
   async execute(action) {
     const p = EmailDraftPayload.parse(JSON.parse(action.payload));
-    await createGmailDraft(ctx, p, fetcher);
-    return { effect: `Draft "${p.subject.slice(0, 80)}" to ${p.to} created in Gmail (not sent)`, simulated: false };
+    const { draftId } = await createGmailDraft(ctx, p, fetcher);
+    return { effect: `Draft "${p.subject.slice(0, 80)}" to ${p.to} created in Gmail (not sent)`, simulated: false, ref: draftId || undefined };
   },
 });
 
@@ -396,9 +398,10 @@ export async function executeAction(ctx: Ctx, id: string, connector?: Connector)
     const result = await (connector ?? connectorFor(ctx, action.service_id)).execute(action);
     run(
       ctx.db,
-      "UPDATE actions SET status = 'executed', executed_at = ?, result = ?, updated_at = ? WHERE id = ?",
+      "UPDATE actions SET status = 'executed', executed_at = ?, result = ?, external_ref = ?, updated_at = ? WHERE id = ?",
       ctx.now().toISOString(),
       result.effect,
+      result.ref ?? null,
       ctx.now().toISOString(),
       id,
     );

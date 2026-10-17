@@ -104,6 +104,17 @@ Exact commands still work instantly, without the model: `add event: dentist tues
 
 **Your requests** (Today) keeps every request with its status and answer: click one to read it. Long requests show their progress (“Reading email 4 of 18…”) and notify you when ready if notifications are on.
 
+## Autopilot: things done without your click (optional)
+
+Off by default: everything waits for your approval. In **Settings → Autopilot** you can let the app act on its own for:
+- **Calendar events you ask for** (“add dentist friday 3pm”): added to the app's own calendar.
+- **Gmail drafts you ask for** (“reply to Ana that Thursday works”, “nudge Tom”): placed in Gmail Drafts, never sent.
+
+It still asks first for anything taken from an email or a web page, a time that could mean two things (“at 9”), events more
+than 60 days away or longer than 12 hours, and drafts to someone whose address isn't in your mail; and it stops at 3 automatic
+actions an hour and 10 a day. Everything it does is listed under **Done for you** on Today, with **Undo** (it also appears
+under the answer in the prompt bar). The **Autopilot on · Pause** button in the header puts everything back to “ask first” at once.
+
 ## Optional: cloud help for understanding requests
 
 Off by default. In **Settings → Understanding requests**, you can let Mistral's API choose which skill answers a Ctrl+K request.

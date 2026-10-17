@@ -23,7 +23,9 @@ The permission model already has the level (`auto_act` in `src/server/policy/lev
 the owner sends it from Gmail). Anything derived from email text ("add the event from my mail", deadlines to reminders, flights
 from booking emails, drafted answers to other people's mails) **stays on "Ask first"**: only what the owner typed may act alone.
 Reminders are already created at once today (local, deletable); autopilot adds them to "Done for you" with Undo.
-Status: in progress (2026-10-17).
+Status: built (2026-10-17), off by default: rule + table tests, autoRun for typed events, drafts and named follow-ups,
+Undo (two exact delete calls), Settings card, header pause switch, "Done for you" with Undo, e2e. Not yet: the briefing's
+summary of yesterday's automatic actions, and "measured trust" suggestions (step 6 of the security tests).
 
 ## 2. Model quality levels: done (2026-10-15/16)
 

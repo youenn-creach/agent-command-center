@@ -69,3 +69,34 @@ describe("reminders placed relative to an event", () => {
     expect(due(ctx)[0].due_at).toBe("2026-10-15T15:00:00.000Z"); // 17:00 in Madrid, the committee is at 18:00
   });
 });
+
+import { correctRoute } from "@/server/agents/command";
+import { run } from "@/server/db";
+
+describe("review fixes (2026-10-17)", () => {
+  it("a named event on a named day: only that day counts", async () => {
+    const ctx = world();
+    // The Spanish exchange is tomorrow, not today: asked about today, the answer is not tomorrow's.
+    expect((await agenda(ctx, "where is the spanish exchange today")).reply).not.toMatch(/tomorrow|Library café/);
+  });
+
+  it("an all-day entry doesn't make an hour busy", async () => {
+    const ctx = world();
+    run(ctx.db, "INSERT INTO events (id, title, starts_at, ends_at, location, is_demo, source) VALUES ('ad1', 'Mum''s birthday', '2026-10-15T22:00:00.000Z', '2026-10-16T22:00:00.000Z', NULL, 1, 'demo')");
+    expect((await agenda(ctx, "am I free at 3pm tomorrow")).reply).toMatch(/^Yes/);
+  });
+
+  it("a reminder before a vague period isn't anchored to a newsletter", async () => {
+    const ctx = world();
+    run(ctx.db, "INSERT INTO messages (id, sender, subject, snippet, received_at, is_demo, source, needs_reply) VALUES ('nl1', 'newsletter@reads.example', 'Your weekend reading', 'Out on Friday', '2026-10-14T08:00:00.000Z', 1, 'demo', 0)");
+    await runCommand(ctx, "remind me to water the plants before the weekend", workflows, { id: "r", label: "r", generate: async () => ({ text: '{"skill":"reminder","args":{}}', model: "r", ms: 1 }) });
+    const r = all<{ text: string }>(ctx.db, "SELECT text FROM reminders WHERE done_at IS NULL");
+    expect(r.map((x) => x.text).join(" ")).not.toMatch(/weekend reading/i);
+  });
+
+  it("how-to and travel questions about 'my' things stay on the web", () => {
+    expect(correctRoute("how do I renew my passport in Spain", { skill: "web_search", args: {} }).skill).toBe("web_search");
+    expect(correctRoute("how far is my hotel from the airport", { skill: "web_search", args: {} }).skill).toBe("web_search");
+    expect(correctRoute("what grammar am I working on in spanish", { skill: "web_search", args: {} }).skill).toBe("notes_search");
+  });
+});
