@@ -17,6 +17,7 @@ import { InsightError, proposeNudge } from "../insights";
 import { autoRun, draftFacts } from "../autopilot";
 import { correctWeekdayDate, weekdayAfter, eventOn, localToday, parseEventRequest, zonedToUtc, type PreparedEvent } from "./eventParse";
 import type { WebResult } from "../connectors/websearch";
+import { relevantPassages } from "./passages";
 import { parseRange } from "./when";
 import { parseSender, writeReply } from "./chiefOfStaff";
 import { upcomingFlights } from "./flights";
@@ -210,6 +211,9 @@ const WHEN = "today|tonight|tomorrow|this (?:week(?:end)?|morning|afternoon|even
 export function quickRoute(text: string): Route | null {
   const t = text.trim().toLowerCase();
   if (/^(?:please\s+)?remind me (?:to|about|that)\b/.test(t)) return { skill: "reminder", args: {} };
+  // "remind me friday to buy snacks", "remind me tonight at 9 to lock the bike": a time, then the task. Not "remind me what…",
+  // nor an event anchor ("the day before my flight", "before the committee"), which the reminder skill places itself.
+  if (/^(?:please\s+)?remind me\s+(?!(?:what|when|where|who|how|which|why|whether|if|of|about|the|before|after)\b)[\w:' ]{2,30}?\s+to\s+(?!\d)\w/.test(t) && !/\b(?:before|after|morning of|day of)\b/.test(t)) return { skill: "reminder", args: {} };
   // "What time is my dentist", "when is my next run": the calendar's next matching event (travel has its own skill).
   if (/^(?:when(?:'s| is) my next|what time(?:'s| is) my(?: next)?)\s+[\p{L}]/u.test(t) && !/\b(flights?|trip|hotel|train|plane|check-?in|booking)\b/.test(t) && !/\band\b/.test(t)) return { skill: "agenda", args: {} };
   if (/^who (?:hasn'?t|has not|didn'?t|did not|still hasn'?t) (?:replied|answered|responded|got(?:ten)? back|written back)\b|^who (?:still )?owes me (?:a |an )?(?:reply|answer)\b/.test(t)) return { skill: "waiting_on", args: {} };
@@ -357,7 +361,7 @@ export async function agenda(ctx: Ctx, text: string): Promise<SkillAnswer> {
     return { reply: `${events.length} event${events.length > 1 ? "s" : ""} ${range.label} ${cut.label}:`, items: events.map((e) => ({ title: `${hm(e.starts_at)}–${hm(e.ends_at)} ${e.title}`, detail: e.location ?? undefined })), section: "today" };
   }
   // "What's left on my calendar today": only what hasn't ended.
-  if (/\b(left|remaining|rest of)\b/i.test(text)) events = events.filter((e) => Date.parse(e.ends_at) > ctx.now().getTime());
+  if (/\b(left|remaining|rest of|still to come|still coming|later today|still on)\b/i.test(text)) events = events.filter((e) => Date.parse(e.ends_at) > ctx.now().getTime());
   // A day question: unanswered mail that names that weekday ("Saturday hike — are you in?") belongs in the answer.
   const spanDays = Math.round((range.to.getTime() - range.from.getTime()) / 86_400_000);
   const dayNames = spanDays <= 3 ? [...new Set(Array.from({ length: Math.max(1, spanDays) }, (_, i) => new Date(range.from.getTime() + i * 86_400_000 + 3_600_000).toLocaleDateString("en-GB", { weekday: "long", timeZone: tz() })))] : [];
@@ -437,9 +441,10 @@ const WEEKDAY_WORDS = /^(?:monday|tuesday|wednesday|thursday|friday|saturday|sun
  * "Where's the spanish exchange", "is the dentist today or tomorrow", "on which day are my long runs": a question about one
  * named event, answered with that event's place, day and time (and its weekday when it repeats), not with a day's list.
  */
-export async function namedEventAnswer(ctx: Ctx, text: string): Promise<SkillAnswer | null> {
+/** `strict`: every word of the question must be in the event ("how long is my spanish streak" is not the Spanish exchange). */
+export async function namedEventAnswer(ctx: Ctx, text: string, strict = false): Promise<SkillAnswer | null> {
   const where = /\bwhere(?:'s| is| are| was)?\b/i.test(text);
-  const when = /\b(?:when(?:'s| is| are| was)?|what time|which days?|what days?|today or tomorrow|tomorrow or today|how long is)\b/i.test(text);
+  const when = /\b(?:when(?:'s| is| are| was)?|what time|which days?|what days?|today or tomorrow|tomorrow or today|how long (?:is|does|will|do)|until when|till when)\b/i.test(text);
   if (!(where || when) || /\b(?:time for|free|busy|available)\b/i.test(text)) return null;
   const words = text.toLowerCase().replace(/[’']s\b/g, "").split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 2 && !QUESTION_WORDS.has(w) && !WEEKDAY_WORDS.test(w)).map(stem);
   if (!words.length) return null;
@@ -454,12 +459,18 @@ export async function namedEventAnswer(ctx: Ctx, text: string): Promise<SkillAns
   const titleWords = (t: string) => new Set(t.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean).map(stem));
   // "Where is spanish class on thursday": only that day's (or period's) events when one is named.
   const asked = /\b(?:today|tonight|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|this week(?:end)?|next week|weekend)\b/i.test(text) && !/\btoday or tomorrow|tomorrow or today\b/i.test(text) ? parseRange(text, ctx.now(), tz()) : null;
-  const hits = got.events.filter((e) => {
-    if (asked && !(Date.parse(e.starts_at) < asked.to.getTime() && Date.parse(e.ends_at) > asked.from.getTime())) return false;
+  const inPeriod = (e: CalEvent) => !asked || (Date.parse(e.starts_at) < asked.to.getTime() && Date.parse(e.ends_at) > asked.from.getTime());
+  const shared = (e: CalEvent) => {
     const tw = titleWords(`${e.title} ${e.location ?? ""}`);
-    const shared = words.filter((w) => tw.has(w)).length;
-    return shared > 0 && shared >= Math.ceil(words.length / 2);
-  });
+    return words.filter((w) => tw.has(w));
+  };
+  let hits = got.events.filter((e) => inPeriod(e) && shared(e).length > 0 && shared(e).length >= (strict ? words.length : Math.ceil(words.length / 2)));
+  // "What time do I need to be at the bike shop": one word only, but a distinctive one ("bike") that only one upcoming
+  // event shares. The answer names the event, so a wrong match shows.
+  if (!hits.length && !strict) {
+    const loose = got.events.filter((e) => inPeriod(e) && shared(e).some((w) => w.length >= 4));
+    if (loose.length && new Set(loose.map((e) => e.title)).size === 1) hits = loose;
+  }
   if (!hits.length) return null;
   const now = ctx.now().getTime();
   const relDay = (iso: string) => {
@@ -479,6 +490,12 @@ export async function namedEventAnswer(ctx: Ctx, text: string): Promise<SkillAns
   }
   if (where) {
     return { reply: first.location ? `“${first.title}” is at ${first.location}, ${relDay(first.starts_at)} (${dayLabel(first.starts_at)}) at ${span}${over}.` : `Your calendar doesn't say where “${first.title}” is (${relDay(first.starts_at)}, ${dayLabel(first.starts_at)} at ${span}).`, items, section: "today" };
+  }
+  // "How long does the committee go on for": its length, with the times.
+  if (/\bhow long\b/i.test(text)) {
+    const min = Math.round((Date.parse(first.ends_at) - Date.parse(first.starts_at)) / 60_000);
+    const length = min % 60 === 0 ? `${min / 60} hour${min === 60 ? "" : "s"}` : min > 60 ? `${Math.floor(min / 60)} h ${min % 60} min` : `${min} minutes`;
+    return { reply: `“${first.title}” lasts ${length}: ${relDay(first.starts_at)} (${dayLabel(first.starts_at)}) ${span}${first.location ? `, ${first.location}` : ""}${over}.`, items, section: "today" };
   }
   return { reply: `“${first.title}”: ${relDay(first.starts_at)} (${dayLabel(first.starts_at)}) at ${span}${first.location ? `, ${first.location}` : ""}${over}.`, items, section: "today" };
 }
@@ -808,12 +825,27 @@ export function groundNumbers(answer: string, sources: string): string {
   const MONTH = "(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?";
   const noDays = (t: string) => t.replace(new RegExp(`\\b(?:[12]?\\d|3[01])(?:st|nd|rd|th)?\\s+${MONTH}|${MONTH}\\s+(?:[12]?\\d|3[01])(?:st|nd|rd|th)?\\b`, "gi"), " ");
   const figures = (sentence: string) => (norm(noDays(sentence).replace(/\[\d+(?:\s*[,\]\[]\s*\d+)*\]/g, "")).match(/\d+(?:[.:]\d+)*/g) ?? []).filter((n) => n.replace(/\D/g, "").length >= 2);
+  const unknown = (t: string) => figures(t).some((n) => !known.has(n) && !n.split(/[.:]/).every((x) => known.has(x)));
+  const CITE = /\[\d+(?:\s*[,\]\[]\s*\d+)*\]/g;
+  // A sentence whose main clause holds no unknown figure keeps that clause ("The Pacific is the largest ocean, covering
+  // 165 million km²" -> "The Pacific is the largest ocean."): dropping it whole left answers starting with "It is also…".
+  const salvage = (sentence: string): string | null => {
+    const end = sentence.match(/[.!?]\s*$/)?.[0]?.trim() ?? "";
+    const body = sentence.slice(0, sentence.length - (sentence.match(/[.!?]\s*$/)?.[0].length ?? 0)).replace(/\s*\([^()]*\)/g, (m) => (unknown(m) ? "" : m));
+    const clauses = body.split(/,\s+|;\s+|\s+[—–]\s+/);
+    // The main clause must stand alone: not a lead-in ("On 12 March, the price rose to 334 EUR" goes whole).
+    if (unknown(clauses[0]) || clauses[0].trim().split(/\s+/).length < 4 || /^(?:on|in|at|by|for|from|since|after|before|during|as of|according to|until|with|without|if|when|while|although|because)\b/i.test(clauses[0].trim())) return null;
+    const kept = clauses.filter((c) => !unknown(c));
+    const cites = [...new Set(clauses.filter((c) => unknown(c)).flatMap((c) => c.match(CITE) ?? []))].filter((c) => !kept.join(" ").includes(c));
+    return `${kept.join(", ").trim()}${cites.length ? ` ${cites.join("")}` : ""}${end || "."}`;
+  };
   const parts = answer.split(/(?<=[.!?])\s+|\n+/);
   let dropped = 0;
-  const kept = parts.filter((p) => {
-    const bad = figures(p).some((n) => !known.has(n) && !n.split(/[.:]/).every((x) => known.has(x)));
-    if (bad) dropped++;
-    return !bad;
+  const kept = parts.flatMap((p) => {
+    if (!unknown(p)) return [p];
+    dropped++;
+    const part = salvage(p);
+    return part ? [part] : [];
   });
   if (!dropped) return answer;
   // Nothing left but citations or punctuation ("[1]"): say so, never show an empty answer.
@@ -839,11 +871,28 @@ export async function webAnswer(ctx: Ctx, question: string, query: string, progr
   if (!("results" in found)) return found;
   progress("Writing the answer…");
   const today = ctx.now().toISOString().slice(0, 10);
-  const sources = found.results.map((r) => fenceUntrusted(`web result [${r.n}] ${new URL(r.url).hostname}`, `Title: ${r.title}\nSnippet: ${r.snippet}${found.pages.has(r.n) ? `\nPage text: ${found.pages.get(r.n)}` : ""}`)).join("\n\n");
-  const out = await llm.generate(WEB_SYSTEM, `Today is ${today}.\nQuestion: ${question}\n\n${sources}`, { maxTokens: 260, timeoutMs: 1_200_000 });
+  const out = await llm.generate(WEB_SYSTEM, webPrompt(question, query, today, found), { maxTokens: 260, timeoutMs: 1_200_000 });
   const sourceText = `${today} ${question} ${found.results.map((r) => `${r.title} ${r.snippet} ${found.pages.get(r.n) ?? ""}`).join(" ")}`;
   return { reply: groundNumbers(plainAnswer(out.text), sourceText), items: webItems(found.results) };
 }
+
+/**
+ * What the model reads for a web answer: the top results' snippets and, from each page read, only the passages
+ * that share words with the question (about 700 characters a page). The first 2,500 characters of every page
+ * made the model read ~2,500 tokens: 8-10 minutes on a laptop CPU.
+ */
+export function webPrompt(question: string, query: string, today: string, found: { results: WebResult[]; pages: Map<number, string> }, mode: "passages" | "lead" = "passages"): string {
+  const results = mode === "lead" ? found.results : found.results.slice(0, WEB_SNIPPETS);
+  const page = (n: number) => {
+    const text = found.pages.get(n);
+    if (!text) return "";
+    return `\nPage text: ${mode === "lead" ? text.slice(0, 2500) : relevantPassages(text, `${question} ${query}`, WEB_PASSAGE_CHARS)}`;
+  };
+  const sources = results.map((r) => fenceUntrusted(`web result [${r.n}] ${new URL(r.url).hostname}`, `Title: ${r.title}\nSnippet: ${r.snippet}${page(r.n)}`)).join("\n\n");
+  return `Today is ${today}.\nQuestion: ${question}\n\n${sources}`;
+}
+const WEB_SNIPPETS = 6;
+const WEB_PASSAGE_CHARS = 700;
 
 /** Reads the top matches of a Gmail search (skipping AI-directed text) for the local model. */
 export async function readMatches(ctx: Ctx, query: string, max: number, progress: (s: string) => void, allowBulk = false) {
@@ -1076,7 +1125,8 @@ async function webSources(ctx: Ctx, query: string, progress: (s: string) => void
     progress(`Reading ${new URL(r.url).hostname}…`);
     try {
       const text = await callTool(ctx, "knowledge", "web.read", { url: r.url }, new RunBudget(1, 30_000));
-      if (!isAiDirected(injectionFlags(text))) pages.set(r.n, text.slice(0, 2500));
+      // The whole readable text (up to 12,000 characters): each caller keeps what it needs.
+      if (!isAiDirected(injectionFlags(text))) pages.set(r.n, text);
     } catch {
       // Unreadable page (blocked, not https, too slow): its snippet still counts.
     }
@@ -1104,7 +1154,7 @@ async function findEventOnWebOnce(ctx: Ctx, text: string, query: string, progres
   const docs = found.results.map((r) => ({
     n: r.n,
     label: `web result [${r.n}] ${new URL(r.url).hostname}`,
-    body: `Title: ${r.title}\nSnippet: ${r.snippet}${found.pages.has(r.n) ? `\nPage text: ${found.pages.get(r.n)}` : ""}`,
+    body: `Title: ${r.title}\nSnippet: ${r.snippet}${found.pages.has(r.n) ? `\nPage text: ${found.pages.get(r.n)!.slice(0, 2500)}` : ""}`,
     cite: `${r.title} (${new URL(r.url).hostname})`,
     title: r.title,
   }));
@@ -1276,11 +1326,12 @@ export async function draftReplyFree(ctx: Ctx, who: string, message: string, pro
 }
 
 /** "What did I note about X?": search the notes, then a grounded answer with sources, by the local model. */
-export async function notesAnswer(ctx: Ctx, query: string, progress: (s: string) => void): Promise<SkillAnswer> {
+/** `question`: the user's words, answered; `query`: the words searched (the router's, often shorter). */
+export async function notesAnswer(ctx: Ctx, query: string, progress: (s: string) => void, question?: string): Promise<SkillAnswer> {
   if (!check(ctx, "knowledge", "demo-notes", "read")) return { reply: "The Knowledge agent has no read access to your notes. Grant it in Connections & Permissions.", section: "permissions" };
   const provider = nanoModelInstalled() && knowledgeStats(ctx).localVectors > 0 ? "local-semantic" : "lexical";
   progress("Searching your notes…");
-  const res = await retrieve(ctx, { query, provider, k: 4, answer: true }, localLlm(ctx, "background"), "chief_of_staff");
+  const res = await retrieve(ctx, { query, provider, k: 4, answer: true, question: question && question !== query ? question.slice(0, 500) : undefined }, localLlm(ctx, "background"), "chief_of_staff");
   if (!res.passages.length) return { reply: `I found nothing about “${query}” in your notes.`, section: "knowledge" };
   return {
     reply: res.answer?.text ? groundNumbers(plainAnswer(res.answer.text), `${query} ${res.passages.map((p) => `${p.title} ${p.text}`).join(" ")}`) : `Top notes for “${query}”:`,
@@ -1327,7 +1378,8 @@ export function looserQuery(query: string): string | null {
 export function looserQueries(query: string): string[] {
   if (/\b(?:from|to|subject|label|in|after|before|newer_than|older_than):/i.test(query)) return []; // a precise search: leave it
   const first = query.split(/\s+OR\s+/i)[0];
-  const words = first.replace(/[()"?.,!]/g, " ").split(/\s+/).filter((w) => w.length > 1 && !SEARCH_FILLER.test(w));
+  // "the landlord's boiler visit": "landlord", not "landlord's" (mail says "your landlord").
+  const words = first.replace(/[()"?.,!]/g, " ").split(/\s+/).map((w) => w.replace(/['’]s$/i, "")).filter((w) => w.length > 1 && !SEARCH_FILLER.test(w));
   const longest = [...words].sort((a, b) => b.length - a.length)[0] ?? "";
   return [...new Set([words.slice(0, 3).join(" "), words.slice(0, 2).join(" "), words[0] ?? "", longest])].filter((q) => q && q !== query);
 }

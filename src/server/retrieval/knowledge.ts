@@ -24,6 +24,8 @@ export const RetrieveInputSchema = z.object({
     .default({}),
   k: z.number().int().min(1).max(8).default(4),
   answer: z.boolean().default(false),
+  /** The user's own question for the answer, when `query` is search words ("kitchen quote B time" for "how long does quote B take"). */
+  question: z.string().trim().min(2).max(500).optional(),
 });
 export type RetrieveInput = z.input<typeof RetrieveInputSchema>;
 
@@ -512,7 +514,7 @@ export async function retrieve(ctx: Ctx, rawInput: RetrieveInput, llm: LlmProvid
   };
 
   if (input.answer) {
-    result.answer = await groundedAnswer(input.query, passages, llm, trace);
+    result.answer = await groundedAnswer(input.question ?? input.query, passages, llm, trace);
   }
 
   run(ctx.db, "INSERT INTO retrieval_runs (id, created_at, query, provider, run_label, result) VALUES (?, ?, ?, ?, ?, ?)", result.id, result.createdAt, input.query, input.provider, runLabel, JSON.stringify(result));

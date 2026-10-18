@@ -28,7 +28,7 @@ import { APP_CALENDAR_NAME } from "../connectors/google";
 import { calendarMode } from "../calendarMode";
 import { alreadyInCalendar, flightEvent, flightKey, upcomingFlights } from "./flights";
 import { checkInReminder, deadlinesToReminders, reminderAtEvent, reminderBeforeEvent, nudgeAll, prepDay, reminderFromEmail, tripWeather } from "./chains";
-import { eventsBetween, agenda, CAN_DO_SHORT, draftReplyFree, emailQuestion, findEventInEmail, findEventOnWeb, webAnswer, emailSearch, meetingPrep, notesAnswer, contactLookup, notesLikely, nudge, priorities, remindersList, quickRoute, reminderFromText, routeRequest, searchWords, subscriptions, trips, waitingOn, weatherAnswer, clarify, type Route, type Skill, type SkillAnswer } from "./assistant";
+import { eventsBetween, namedEventAnswer, agenda, CAN_DO_SHORT, draftReplyFree, emailQuestion, findEventInEmail, findEventOnWeb, webAnswer, emailSearch, meetingPrep, notesAnswer, contactLookup, notesLikely, nudge, priorities, remindersList, quickRoute, reminderFromText, routeRequest, searchWords, subscriptions, trips, waitingOn, weatherAnswer, clarify, type Route, type Skill, type SkillAnswer } from "./assistant";
 import { reviewInbox } from "./inboxReview";
 import type { LlmProvider } from "../llm";
 import { finishRequest, setRequestProgress } from "../requests";
@@ -391,7 +391,7 @@ const EXACT: ReadonlySet<Intent> = new Set(["draft", "event", "remember", "slots
 
 // Two asks in one request ("what's my day tomorrow and is it going to rain"): each half is understood on its own, the
 // answers are put together. Only when the second half starts with a request verb, so "lunch with Sam and Priya" stays one.
-const SECOND_ASK = /\s+(?:and then|and also|and|then|also)\s+(?=(?:remind me|let [\p{L}'-]+ know\b|tell |email |e-mail |message |text |write |reply |chase |nudge |follow up|is it |is anything |is there |will it |are there |do i |am i |has |have |did |does |whether |what\b|who\b|when\b|where\b|how\b|check |find |look up|set |send |draft |show |give me|put |add ))/iu;
+const SECOND_ASK = /,?\s+(?:and if not,?|if not,?|and if (?:he|she|they|it)\s+(?:still\s+)?(?:hasn'?t|has not|haven'?t|have not|didn'?t|did not|isn'?t|is not)(?:\s+yet)?,?|and then|and also|and|then|also)\s+(?=(?:remind me|let [\p{L}'-]+ know\b|tell |email |e-mail |message |text |write |reply |chase |nudge |follow up|is it |is anything |is there |will it |are there |do i |am i |has |have |did |does |whether |what\b|who\b|when\b|where\b|how\b|check |find |look up|set |send |draft |show |give me|put |add ))/iu;
 const FREE_TEXT_START = /^(?:remind me|remember|add a (?:reminder|to-?do|task)|note that|don'?t let me forget)\b/i;
 
 /** The two halves of a request that asks two things, or null. Pure. */
@@ -429,12 +429,20 @@ export function splitAsks(text: string, knownPeople: string[] = []): [string, st
   const names = [...new Set([...a.matchAll(/\b([A-Z][\p{L}'-]{2,})\b/gu)].map((x) => x[1]).filter((n, i) => !(i === 0 && a.startsWith(n)) && !/^I['’]/.test(n) && !/^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|January|February|March|April|May|June|July|August|September|October|November|December)$/.test(n)))];
   // A name typed in lowercase after a verb ("chase priya about the quote") counts too.
   const typed = a.match(/\b(?:chase|nudge|tell|email|e-mail|ask|call|text|message|with|from)\s+(?!me\b|him\b|her\b|them\b|the\b|my\b|a\b|an\b|everyone\b|everybody\b|someone\b)([\p{L}][\p{L}'-]{2,})\b/iu)?.[1];
-  const person = a.match(/\bwith\s+([A-Z][\p{L}'-]+)/u)?.[1] ?? (names.length === 1 ? names[0] : typed ? typed.charAt(0).toUpperCase() + typed.slice(1) : undefined);
+  const person = a.match(/\bwith\s+([A-Z][\p{L}'-]+)/u)?.[1] ?? (names.length === 1 ? names[0] : typed ? typed.charAt(0).toUpperCase() + typed.slice(1) : knownInA);
   if (person) b = b.replace(/\b(?:her|him|them|she|he)\b/i, person);
   // "summarize the maria email and draft a yes": the reply is to the person the first half is about.
   const replyWord = b.match(/^(?:draft|write|send|prepare)\s+(?:a|an)\s+(yes|no|reply|answer|thank[- ]?you|thanks)\b(.*)$/i);
   const about = knownInA ?? person;
   if (replyWord && about) b = `reply to ${about}: ${replyWord[1]}${replyWord[2]}`;
+  // "what did the landlord say and reply that tuesday is fine": the reply goes to the one the first half is about.
+  const bareReply = b.match(/^(?:reply|answer|respond|write back)\s+((?:that|saying|to say|yes|no)\b.*)$/i);
+  if (bareReply && about) b = `reply to ${about} ${bareReply[1]}`;
+  // "how much is quote B and what does it include": "it" is what the first half asks about.
+  const askedAbout = a.match(/^(?:how much|what|when|where|how long|how big|how far)\b.*?\b(?:is|are|was|does|do)\s+(?:the\s+|my\s+)?([\p{L}\d][\p{L}\d' -]{1,30}?)\s*\??$/iu)?.[1];
+  // Never the "it" of the weather or of "is it ok/too late" ("when is lunch and is it going to rain").
+  const dummyIt = /\b(?:is|will|does|did)\s+it\s+(?:going to\s+|gonna\s+)?(?:rain|snow|be\s+(?:sunny|cold|hot|warm|windy|nice|wet|dry)|sunny|cold|hot|warm|windy|ok|okay|too|worth|possible|late|early|safe)\b|\bit'?s\b|\bweather\b/i;
+  if (askedAbout && /^(?:what|how|when|where|which|who|is|does|do|did|can)\b/i.test(b) && /\bit\b/i.test(b) && !dummyIt.test(b) && !/\bit\b/i.test(askedAbout)) b = b.replace(/\bit\b/i, askedAbout);
   // "how much is the insurance and remind me 2 weeks before it renews": "it" is what the first half is about.
   if (/^(?:please\s+)?(?:remind me|set (?:me )?a reminder)\b/i.test(b) && /\bit\b/i.test(b) && !/\(about /.test(b)) {
     const subject = searchWords(a).split(/\s+/).slice(0, 3).join(" ");
@@ -589,7 +597,7 @@ async function handle(ctx: Ctx, text: string, workflows: WorkflowRegistry, llm?:
 /** What a request asks to add, without the wrapper ("put … in my calendar"). */
 function eventText(text: string) {
   return text
-    .replace(/^\s*(?:please\s+)?(?:can you\s+|could you\s+)?(?:add|put|schedule|create|book|set up|make|block)\s+(?:an?\s+)?(?:new\s+)?(?:event|appointment|meeting)?\s*:?\s*/i, "")
+    .replace(/^\s*(?:please\s+)?(?:can you\s+|could you\s+)?(?:add|put|schedule|create|book|set up|make|block|pencil)(?:\s+(?:in|down))?\s+(?:an?\s+)?(?:new\s+)?(?:event|appointment|meeting)?\s*:?\s*/i, "")
     .replace(/\s+(?:to|in|into|on)\s+(?:my\s+)?(?:calendar|agenda|schedule)\b(?:\s+as an event)?/i, "")
     .trim();
 }
@@ -606,6 +614,7 @@ const MAIL_WORD = /\b(e-?mails?|mail|inbox|gmail)\b/i;
 const TO_CALENDAR = /\b(add|put|save|create)\b.*\b(calendar|agenda)\b/i;
 const RELATIVE_BEFORE = /\b(?:the (?:day|week) before|\d+ (?:days?|weeks?) before|a (?:day|week) before)\b/i;
 const FLIGHT_WORD = /\b(flights?|planes?|plane tickets)\b/i;
+const TRAVEL_WORD = /\b(trips?|travel\w*|flights?|fly|flying|flies|planes?|airlines?|airports?|land(?:s|ing)?|depart\w*|take ?off|hotels?|stay\w*|nights?|bookings?|booked|reservations?|check-?in|check-?out|holidays?|vacations?|journey|trains?|abroad|destination|luggage|boarding|passport|gate|terminal|arriv\w*|guesthouse|airbnb|rental car|car rental|itinerar(?:y|ies)|visas?|(?:leave|leaving|go|going|head(?:ing)?|get(?:ting)?)\s+(?:to|for)\s+(?!the\s|my\s|a\s)[\p{L}]{3,})\b/iu;
 // "Remind me to chase Laura on Monday" is a reminder for the user, even though it names someone to chase.
 const SELF_REMINDER = /\b(remind (?:me|myself)|don'?t let me forget|set (?:a|me a) reminder|add a (?:reminder|to-?do|task))\b/i;
 
@@ -626,8 +635,14 @@ export function correctRoute(text: string, route: Route): Route {
   if (route.skill === "waiting_on" && /\b(?:plans?|planned|busy|free)\b/i.test(text) && !/\b(?:answer|answered|repl(?:y|ied)|got back|owe)\b/i.test(text)) return { skill: "agenda", args: {} };
   // "Give me a quick rundown of tomorrow": that day's calendar, not the morning briefing or meeting briefs.
   if (["prep_day", "briefing", "weekly_review"].includes(route.skill) && /\b(?:rundown|run-?through|overview|summary|summari[sz]e|recap)\b/i.test(text) && /\b(?:today|tomorrow|tonight|my day|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.test(text) && !/\b(?:meetings?|prep\w*|brief\w*|news|mail|emails?|inbox)\b/i.test(text)) return { skill: "agenda", args: {} };
+  // "How many nights is the alfama booking": a question, not "add it to my calendar" (no add or calendar word).
+  // (When, where and what-time questions are left to the calendar nets below.)
+  if (route.skill === "event_from_email" && /^\s*(?:how (?:many|much|long)|what(?!\s+time)|which|who|is|are|do|does|did|has|have)\b/i.test(text) && !/\b(?:add|put|save|create|schedule|calendar|agenda)\b/i.test(text)) return TRAVEL_WORD.test(text) ? { skill: "trips", args: {} } : { skill: "email_question", args: route.args.query ? { query: route.args.query } : {} };
+  // "What should I bring on the hike" (the model: a reply to Maria): a question about the mail, not something to write.
+  if (route.skill === "draft_reply" && /^\s*(?:what|when|where|which|who|how|should i|do i|did|does|is|are)\b/i.test(text) && !/\b(?:reply|replies|answer|respond|write|tell|say|let .{1,30} know|e-?mail (?:him|her|them|back)|draft|confirm|accept|decline)\b/i.test(text)) return { skill: "email_question", args: route.args.who ? { query: `from:${route.args.who}` } : {} };
   // "What bills do I have coming up": money owed is in the mail, not the calendar.
-  if ((route.skill === "agenda" || route.skill === "priorities") && /\b(?:bills?|invoices?|payments?|owe|to pay|renewals?)\b/i.test(text) && !/\b(?:calendar|agenda|meetings?|events?|appointments?)\b/i.test(text)) return { skill: "email_question", args: { query: "(bill OR invoice OR payment OR renewal OR renews OR due)" } };
+  // Also when the model said inbox review, waiting on or weekly review: "coming up" would then send it to the calendar.
+  if (["agenda", "priorities", "inbox_review", "waiting_on", "weekly_review"].includes(route.skill) && /\b(?:bills?|invoices?|payments?|owe|to pay|renewals?)\b/i.test(text) && !/\b(?:repl(?:y|ies)|answers?|respon[ds]\w*|got back)\b/i.test(text) && !/\b(?:calendar|agenda|meetings?|events?|appointments?)\b/i.test(text)) return { skill: "email_question", args: { query: "(bill OR invoice OR payment OR renewal OR renews OR due)" } };
   // "What's left today": the rest of the calendar, not the priorities list.
   if (route.skill === "priorities" && /\b(?:left|remaining|rest of)\b/i.test(text) && !/\b(?:to-?dos?|tasks?|reminders?)\b/i.test(text)) return { skill: "agenda", args: {} };
   // "What's the kitchen budget": subscriptions are only what the user pays for regularly or gets as newsletters.
@@ -707,6 +722,23 @@ async function settleRoute(ctx: Ctx, text: string, route: Route): Promise<Route>
   }
   // A mail search needs two words of a note's title ("kitchen" and "quote"): "renew something soon" stays a mail question.
   if (!MAIL_WORD.test(text) && ((route.skill === "inbox_review" && (await notesLikely(ctx, text))) || (["email_search", "email_question"].includes(route.skill) && (await notesLikely(ctx, text, 2))))) route = { skill: "notes_search", args: { query: text } };
+  // "Where do I drop off my bike", "how long does the garden committee go on for": a question about an event in the calendar
+  // is the calendar's, whichever of trips, notes or mail the model picked.
+  // Over notes or mail, every word must be the event's ("how long is my spanish streak" stays a note); over trips (never
+  // right without a travel word) the usual match is enough.
+  if (["trips", "notes_search", "email_question", "email_search"].includes(route.skill) && !TO_CALENDAR.test(text) && !/\b(remind|reminder|flights?|hotels?|bookings?|e-?mails?|mail|inbox|notes?)\b/i.test(text) && (await namedEventAnswer(ctx, text, route.skill !== "trips"))) route = { skill: "agenda", args: {} };
+  // "Add the school concert on november 12 at 6:30pm": the request gives the day and the time, so it's the user's own event,
+  // not one to look up on the web (which found another school's concert).
+  if (route.skill === "event_from_web" && !/\b(?:web|online|internet|look (?:it )?up|search|find|official|public)\b/i.test(text) && /\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|\b\d{1,2}:\d{2}\b/i.test(text)) {
+    const p = parseEventRequest(eventText(text), ctx.now(), config().timezone);
+    if (!("error" in p) && !p.allDay) route = { skill: "add_event", args: {} };
+  }
+  // Trips answer only about travel: "which route is maria planning" has no travel word and names nothing booked, so it's a
+  // question for the mail (the trips list was shown for anything the model couldn't place).
+  if (route.skill === "trips" && !TRAVEL_WORD.test(text)) {
+    const booked = new Set(all<{ subject: string }>(ctx.db, `SELECT subject FROM bookings WHERE 1 = 1${demoRowsFilter()}`).flatMap((b) => b.subject.toLowerCase().match(/\p{L}{4,}/gu) ?? []));
+    if (!(text.toLowerCase().match(/\p{L}{4,}/gu) ?? []).some((w) => booked.has(w))) route = { skill: "email_question", args: { query: searchWords(text) } };
+  }
   const s = route.skill;
   if (TO_CALENDAR.test(text) && /\b(reply|answer|tell|write back|accept|confirm)\b/i.test(text) && (s === "draft_reply" || s === "add_event") && route.args.who) {
     route = { skill: "reply_and_add", args: route.args };
@@ -747,7 +779,12 @@ async function runSkill(ctx: Ctx, text: string, route: Route, workflows: Workflo
     }
     case "email_question": {
       const query = a.query?.trim() || searchWords(text) || text;
-      return later("email_question", "Looking through your mail for the answer with the local model. It will appear under “Your requests” on Today.", (p) => emailQuestion(ctx, text, query, p));
+      return later("email_question", "Looking through your mail for the answer with the local model. It will appear under “Your requests” on Today.", async (p) => {
+        const mail = await emailQuestion(ctx, text, query, p);
+        // "How long would quote A take": no email about it, but a note is: the notes answer (the mail wasn't named).
+        if (/^I found no email matching/.test(mail.reply) && !MAIL_WORD.test(text) && (await notesLikely(ctx, text))) return notesAnswer(ctx, text, p);
+        return mail;
+      });
     }
     case "meeting_prep": {
       const who = a.who?.trim() || a.query?.trim() || text;
@@ -860,10 +897,10 @@ async function runSkill(ctx: Ctx, text: string, route: Route, workflows: Workflo
       if (MONEY_OR_DATE.test(text) && !/\b(?:notes?|wrote|written|jotted)\b/i.test(text) && isConnected(ctx, "gmail")) {
         return later("notes", "Looking in your mail and your notes with the local model. The answer will appear under “Your requests” on Today.", async (p) => {
           const mail = await emailQuestion(ctx, text, searchWords(text) || query, p);
-          return /^I found no email matching/.test(mail.reply) ? notesAnswer(ctx, query, p) : mail;
+          return /^I found no email matching/.test(mail.reply) ? notesAnswer(ctx, query, p, text) : mail;
         });
       }
-      return later("notes", `Looking in your notes for “${query}” and writing an answer with the local model. It will appear under “Your requests” on Today.`, (p) => notesAnswer(ctx, query, p));
+      return later("notes", `Looking in your notes for “${query}” and writing an answer with the local model. It will appear under “Your requests” on Today.`, (p) => notesAnswer(ctx, query, p, text));
     }
     case "briefing":
       return runIntent(ctx, text, { intent: "briefing" }, workflows);

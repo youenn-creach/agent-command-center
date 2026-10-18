@@ -79,7 +79,10 @@ export function normalizeDayWords(text: string): string {
 
 /** `defaultMinutes`: the time of day to use when the text gives a date but no time (a reminder is due at 09:00, not at midnight). */
 export function parseEventRequest(text: string, now: Date, tz: string, defaultMinutes?: number): PreparedEvent | { error: string } {
-  let s = ` ${normalizeDayWords(text).replace(/\s+/g, " ").trim()} `;
+  // "at half past four", "at seven": clock hours written as words become digits, only where a time ends ("at Seven Seas"
+  // stays a name).
+  const HOUR_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
+  let s = ` ${normalizeDayWords(text).replace(/\s+/g, " ").trim()} `.replace(/\b(at|half past)\s+(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b(?=\s*(?:$|[,.;!?]|(?:am|pm|o'?clock|tonight|tomorrow|today|on|to|and|in the|this|next|(?:mon|tues|wednes|thurs|fri|satur|sun)day)\b))/gi, (_m, w: string, n: string) => `${w} ${HOUR_WORDS[n.toLowerCase()]}`);
   const take = (re: RegExp) => {
     const m = s.match(re);
     if (m) s = s.replace(m[0], " ");
@@ -116,8 +119,9 @@ export function parseEventRequest(text: string, now: Date, tz: string, defaultMi
       take(new RegExp(`\\s(?:(?:at|à)\\s+)?(\\d{1,2})(?:[:h.](\\d{2}))?\\s*(am|pm)(?=\\s)`, "i")) ??
       take(/\s(?:(?:at|à)\s+)?(\d{1,2})[:h](\d{2})(?=\s)/i) ??
       take(/\s(?:(?:at|à)\s+)?(\d{1,2})h()(?=\s)/i) ?? // "15h"
-      // "at 9", "at 3": a bare hour after "at" at the end or before a day word. Small hours are afternoon (1-6), then morning.
-      take(/\s(?:at|à)\s+(\d{1,2})()(?=\s*$|\s+(?:on|tomorrow|today|tonight|for|next|and|with|in|every|this|the)\b)/i);
+      // "at 9", "at 3": a bare hour after "at" at the end, before a day word, or before the task ("remind me at 3 to call
+      // the bank"; never "at 2 to 4", a range). Small hours are afternoon (1-6), then morning.
+      take(/\s(?:at|à)\s+(\d{1,2})()(?=\s*$|\s+(?:on|tomorrow|today|tonight|for|next|and|with|in|every|this|the)\b|\s+to\s+(?!\d))/i);
     if (single && !single[2] && !single[3] && /^\s(?:at|à)\s+\d{1,2}\s*$/i.test(single[0]) && Number(single[1]) >= 1 && Number(single[1]) <= 12) {
       const h = Number(single[1]);
       start = (h === 12 ? 12 : h <= 6 ? h + 12 : h) * 60;
@@ -131,7 +135,10 @@ export function parseEventRequest(text: string, now: Date, tz: string, defaultMi
   // "friday evening", "in the morning", "tonight": a rough time of day, and "tonight at 8" means 20:00, not 08:00.
   {
     // "night" counts only after a day ("friday night", "tomorrow night") or as "at night": "night shift" keeps its title.
-    const word = (take(/\s(?:in the\s+|this\s+|on\s+)?(morning|afternoon|evening)(?=\s)/i) ?? take(/(?:(?<=(?:mon|tues|wednes|thurs|fri|satur|sun)day|tomorrow|tmrw)\s+|\s+at\s+)(night)(?=\s)/i))?.[1].toLowerCase();
+    // With an exact time already given, "evening" belongs to the title ("parents evening at 7pm", "the morning run at 7am")
+    // unless a day or "this"/"in the" comes with it ("friday evening at 8" is 20:00).
+    const partOfDay = start === null ? /\s(?:in the\s+|this\s+|on\s+)?(morning|afternoon|evening)(?=\s)/i : /(?:\s(?:in the|this)\s+|(?<=(?:mon|tues|wednes|thurs|fri|satur|sun)day|tomorrow|tmrw|today)\s+)(morning|afternoon|evening)(?=\s)/i;
+    const word = (take(partOfDay) ?? take(/(?:(?<=(?:mon|tues|wednes|thurs|fri|satur|sun)day|tomorrow|tmrw)\s+|\s+at\s+)(night)(?=\s)/i))?.[1].toLowerCase();
     // "night" only gives a default time (20:00): an explicit "1am-4am night shift" stays in the early morning.
     const part = (word === "night" ? undefined : word) as "morning" | "afternoon" | "evening" | undefined;
     const nightWord = word === "night";

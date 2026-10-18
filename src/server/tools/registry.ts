@@ -256,7 +256,7 @@ export const TOOLS = {
     serviceId: "web-search",
     required: "read",
     input: z.object({ url: z.string().url().max(500) }),
-    run: (_ctx, input) => readPage(input.url),
+    run: (_ctx, input) => readPage(input.url, 12_000),
     summarize: (o) => `${o.length} characters of page text`,
   }),
   "knowledge.search": tool({

@@ -300,8 +300,11 @@ export async function reminderBeforeEvent(ctx: Ctx, text: string, query: string)
   const remindDay = addDays(day, -lead);
   if (ymd(remindDay) < ymd(today)) return { reply: `Your “${hit.title}” is ${when}: ${lead === 1 ? "the day before" : `${lead} days before`} has already passed, so I didn't set a reminder.`, section: "today" };
   const r = remindAt(ctx, day, lead);
-  const added = remindOnce(ctx, `${hit.title} (${when})`, r.dueAt);
-  return { reply: `${added ? "Added to your reminders" : "Already in your reminders"}: “${hit.title} (${when})”. I'll remind you ${r.label}.`, section: "today" };
+  // "…the day before the long run to get my gear ready": the reminder is the task, with the event for context.
+  const task = text.match(/\bbefore\s+(?:the\s+|my\s+)?[\p{L}][\p{L}' -]{2,40}?\s+(?:to|that|so)\s+(.{3,120}?)[.!?]*$/iu)?.[1]?.trim();
+  const title = task ? `${task.replace(/^\w/, (c) => c.toUpperCase())} (before ${hit.title}, ${when})` : `${hit.title} (${when})`;
+  const added = remindOnce(ctx, title, r.dueAt);
+  return { reply: `${added ? "Added to your reminders" : "Already in your reminders"}: “${title}”. I'll remind you ${r.label}.`, section: "today" };
 }
 
 /**

@@ -70,3 +70,20 @@ dates, topic follow-ups), "Understood as … · Not right?" (Phase D2). Measured
 made worse, none fixed, +31 s per request; the two v1 requests it had rescued are now routed directly). Not built: voting, the planner fallback, the mistakes log beyond corrections, typing suggestions.
 Why stopped: the last rounds removed 10-22% of the remaining held-out errors, under the owner's 30% bar; corrections from
 real use are expected to help more from here.
+
+## Second pass (2026-10-17/18, owner away): fresh sets, one per round
+v2 had been measured four times, so each round got a NEW held-out set, written and committed before the code it measures.
+After a round, that set's failures were studied and fixed (it becomes tuning material) and the next set measured the result.
+
+| Code | Fresh held-out set | Same set after its fixes |
+|---|---|---|
+| c6: web answers from matching passages, figure check keeps the main clause | v3: 51/60 (15%) | 60/60 |
+| c7: v3's fixes (time before the task, calendar-event questions, notes fallback) | v4: 50/60 (17%) | 57/60 |
+| c8: v4's general fixes (trips only for travel, questions never "add") | v5: 50/60 (17%) | — |
+
+Reading: about **15-17% errors on wordings never seen**, flat over three rounds. Fixing studied failures makes them pass but
+doesn't move the fresh-set rate: each new set finds different gaps. Strong on fresh sets: reminders, notes, mail actions, web,
+trips, refusals (all or nearly all right). Weak: calendar questions (5/8) and two-part requests (5/8). v1 dev stayed at 2%.
+Speed: web answers 2.25x faster (707 s -> 314 s, same accuracy on 26 questions); a request now averages 77-104 s.
+Stopped again under the 30% rule. Next levers are not more wording rules but the user's own corrections ("Not right?")
+and, if wanted, the free cloud router for routing only.

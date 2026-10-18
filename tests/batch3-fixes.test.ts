@@ -341,6 +341,15 @@ describe("figures in answers must be in the sources", () => {
     expect(groundNumbers("Quote B is €7,600 and the cap is €8 000 [1][2].", "Quote B: €7600. Ceiling €8,000.")).toBe("Quote B is €7,600 and the cap is €8 000 [1][2].");
     expect(groundNumbers("The engineer comes next Tuesday (October 20, 2026) between 9 and 12.", "2026-10-15 between 9 and 12 next Tuesday")).toBe("The engineer comes next Tuesday (October 20, 2026) between 9 and 12.");
   });
+  it("keeps the main clause when only a side clause or a parenthesis has the unknown figure", () => {
+    const src = "The Pacific Ocean is the largest and deepest of Earth's five oceanic divisions.";
+    // The web A/B of 2026-10-17: dropping this sentence whole left an answer starting "It is also the deepest".
+    expect(groundNumbers("The Pacific Ocean is the largest ocean on Earth, covering about 165 million square kilometres [1]. It is also the deepest [1].", src))
+      .toBe("The Pacific Ocean is the largest ocean on Earth [1]. It is also the deepest [1]. (I left out a figure I couldn't find in the sources.)");
+    expect(groundNumbers("The Pacific (about 165 million km²) is the largest ocean [2].", src)).toBe("The Pacific is the largest ocean [2]. (I left out a figure I couldn't find in the sources.)");
+    // The main clause itself holds the figure: the sentence still goes.
+    expect(groundNumbers("It covers 165 million km², the largest of all. The Pacific is the largest ocean.", src)).toBe("The Pacific is the largest ocean. (I left out a figure I couldn't find in the sources.)");
+  });
   it("internal data tags never reach the user", () => {
     expect(plainAnswer("Amount: <untrusted>334 EUR</untrusted> due.")).toBe("Amount: 334 EUR due.");
   });

@@ -14,6 +14,9 @@ import { listActions } from "@/server/approvals";
 import { connectFakeGmail } from "./sim-gmail";
 import { EVALSET } from "./evalset/v1";
 import { EVALSET_V2 } from "./evalset/v2";
+import { EVALSET_V3 } from "./evalset/v3";
+import { EVALSET_V4 } from "./evalset/v4";
+import { EVALSET_V5 } from "./evalset/v5";
 import type { EvalItem, EvalResult } from "./evalset/types";
 
 /**
@@ -22,7 +25,7 @@ import type { EvalItem, EvalResult } from "./evalset/types";
  * evaluation clock, so requests never influence each other and expectations never go stale.
  *
  *   EVAL_SPLIT=dev|test|all ACC_DATA_DIR=.e2e-data/eval-x OLLAMA_CHAT_MODEL=ministral-3:8b npx tsx scripts/eval-run.mts [first-last]
- * Optional: EVAL_SET=v2 (the fresh held-out set), EVAL_SELFCHECK=on (off by default), EVAL_EXAMPLES=off (the example library is on by default), EVAL_RESTATE=on (goal restated before the skill), EVAL_MODELSPLIT=on (the model splits two-part requests), EVAL_OUT=<file.json>. Prints one line per request and a summary per category and failure kind.
+ * Optional: EVAL_SET=v2|v3|v4|v5 (later held-out sets; v5 is the newest), EVAL_SELFCHECK=on (off by default), EVAL_EXAMPLES=off (the example library is on by default), EVAL_RESTATE=on (goal restated before the skill), EVAL_MODELSPLIT=on (the model splits two-part requests), EVAL_OUT=<file.json>. Prints one line per request and a summary per category and failure kind.
  * Works with scripts/sim-supervisor.mts (it prints "#n [intent]" headers and resumes with a range).
  */
 // Always the fictional data: never the personal mode a local .env.local may set for the real app.
@@ -43,8 +46,8 @@ if (process.env.EVAL_RESTATE === "on") setSetting(ctx.db, "assistant.restate", "
 if (process.env.EVAL_MODELSPLIT === "on") setSetting(ctx.db, "assistant.modelsplit", "on");
 
 const split = process.env.EVAL_SPLIT ?? "dev";
-// EVAL_SET=v2: the fresh held-out set (test only); v1 by default.
-const items: EvalItem[] = (process.env.EVAL_SET === "v2" ? EVALSET_V2 : EVALSET).filter((i) => split === "all" || i.split === split);
+// EVAL_SET=v2 to v5: the later held-out sets (test only; v5 is the newest); v1 by default.
+const items: EvalItem[] = (process.env.EVAL_SET === "v5" ? EVALSET_V5 : process.env.EVAL_SET === "v4" ? EVALSET_V4 : process.env.EVAL_SET === "v3" ? EVALSET_V3 : process.env.EVAL_SET === "v2" ? EVALSET_V2 : EVALSET).filter((i) => split === "all" || i.split === split);
 const range = process.argv[2]?.match(/^(\d+)-(\d+)$/);
 const picked = items.map((item, i) => ({ item, n: i + 1 })).filter((r) => !range || (r.n >= +range[1] && r.n <= +range[2]));
 
@@ -106,7 +109,7 @@ for (const { item, n } of picked) {
   console.log(`#${n} [${direct.intent}] ${r.pass ? "PASS" : "FAIL"} ${Math.round(r.ms / 1000)}s ${item.id} | ${item.text}${r.pass ? "" : `\n   ✗ ${fails.join("; ")}\n   → ${shown.replace(/\n/g, " ⏎ ").slice(0, 400)}`}`);
 }
 
-const out = process.env.EVAL_OUT ?? path.join(process.env.ACC_DATA_DIR ?? ".e2e-data/eval", `eval-${process.env.EVAL_SET === "v2" ? "v2-" : ""}${split}${range ? `-${range[0]}` : ""}.json`);
+const out = process.env.EVAL_OUT ?? path.join(process.env.ACC_DATA_DIR ?? ".e2e-data/eval", `eval-${["v2", "v3", "v4", "v5"].includes(process.env.EVAL_SET ?? "") ? `${process.env.EVAL_SET}-` : ""}${split}${range ? `-${range[0]}` : ""}.json`);
 mkdirSync(path.dirname(out), { recursive: true });
 writeFileSync(out, JSON.stringify(results, null, 1));
 const pass = results.filter((r) => r.pass).length;

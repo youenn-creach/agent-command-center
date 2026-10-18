@@ -141,8 +141,11 @@ function text(v: unknown): string {
 
 export function cleanText(html: string, max = SUMMARY_CHARS): string {
   const plain = html
+    .replace(/<!--[\s\S]*?-->/g, " ")
     .replace(/<(script|style)[\s\S]*?<\/\1>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
+    // A tag ends at the first ">" outside quotes: Wikipedia's attributes hold JSON with "<" and ">" in it.
+    .replace(/<\/?[a-zA-Z](?:"[^"]*"|'[^']*'|[^'">])*>/g, " ")
+    .replace(/<[!?][^>]*>/g, " ")
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
