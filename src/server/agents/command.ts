@@ -28,7 +28,7 @@ import { APP_CALENDAR_NAME } from "../connectors/google";
 import { calendarMode } from "../calendarMode";
 import { alreadyInCalendar, flightEvent, flightKey, upcomingFlights } from "./flights";
 import { checkInReminder, deadlinesToReminders, reminderAtEvent, reminderBeforeEvent, nudgeAll, prepDay, reminderFromEmail, tripWeather } from "./chains";
-import { eventsBetween, namedEventAnswer, agenda, CAN_DO_SHORT, draftReplyFree, emailQuestion, findEventInEmail, findEventOnWeb, webAnswer, emailSearch, meetingPrep, notesAnswer, contactLookup, notesLikely, nudge, priorities, remindersList, quickRoute, reminderFromText, routeRequest, searchWords, subscriptions, trips, waitingOn, weatherAnswer, clarify, type Route, type Skill, type SkillAnswer } from "./assistant";
+import { eventsBetween, namedEventAnswer, calendarQuestion, calendarModelAnswer, agenda, CAN_DO_SHORT, draftReplyFree, emailQuestion, findEventInEmail, findEventOnWeb, webAnswer, emailSearch, meetingPrep, notesAnswer, contactLookup, notesLikely, nudge, priorities, remindersList, quickRoute, reminderFromText, routeRequest, searchWords, subscriptions, trips, waitingOn, weatherAnswer, clarify, type Route, type Skill, type SkillAnswer } from "./assistant";
 import { reviewInbox } from "./inboxReview";
 import type { LlmProvider } from "../llm";
 import { finishRequest, setRequestProgress } from "../requests";
@@ -760,6 +760,11 @@ async function settleRoute(ctx: Ctx, text: string, route: Route): Promise<Route>
   return route;
 }
 
+/** Experiment (off by default): a calendar question the rules could only answer with a list goes to the model. Exported for tests. */
+export function wantsCalendarModel(ctx: Ctx, text: string, listed: SkillAnswer): boolean {
+  return getSetting(ctx.db, "assistant.calendarModel") === "on" && calendarQuestion(text) && /^\d+ events? /.test(listed.reply) && Boolean(listed.items?.length);
+}
+
 /** Runs one skill. `chosen`: the user picked it themselves ("not right?"), so the nets don't second-guess it. */
 async function runSkill(ctx: Ctx, text: string, route: Route, workflows: WorkflowRegistry, chosen = false): Promise<CommandResult> {
   if (!chosen) route = await settleRoute(ctx, text, route);
@@ -798,8 +803,14 @@ async function runSkill(ctx: Ctx, text: string, route: Route, workflows: Workflo
       const days = a.days ?? (who ? (/\btoday\b/i.test(text) ? 1 : /\bweek\b/i.test(text) ? 7 : 3) : undefined);
       return answer("email_search", await emailSearch(ctx, who ? "in:inbox" : a.query?.trim() || searchWords(text) || text, days));
     }
-    case "agenda":
-      return answer("agenda", await agenda(ctx, text));
+    case "agenda": {
+      const listed = await agenda(ctx, text);
+      // Experiment (off by default): a question the rules could only answer with a list is answered by the model from it.
+      if (wantsCalendarModel(ctx, text, listed)) {
+        return later("agenda", "Reading your calendar to answer with the local model. It will appear under “Your requests” on Today.", (p) => calendarModelAnswer(ctx, text, listed, p));
+      }
+      return answer("agenda", listed);
+    }
     case "add_event":
       return runIntent(ctx, text, { intent: "event", query: eventText(text) }, workflows);
     case "add_flights":

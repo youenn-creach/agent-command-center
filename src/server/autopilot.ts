@@ -53,6 +53,12 @@ export interface AutoSetting {
 
 export const DEFAULT_PER_HOUR = 3;
 export const DEFAULT_PER_DAY = 10;
+/**
+ * The owner can raise the limits in Settings, never past these (a tampered setting is read as at most these too). 20 a day is
+ * also each Google write's own cap (20 app-calendar events, 20 drafts a day), so a higher number would promise nothing.
+ */
+export const MAX_PER_HOUR = 10;
+export const MAX_PER_DAY = 20;
 
 /**
  * Whether one prepared action may run without the owner's click, and why not when it may not. Pure: no database, no clock
@@ -87,9 +93,13 @@ export function mayAutoRun(kind: string, origin: Origin, facts: AutoFacts, budge
 export function autopilotStatus(ctx: Ctx) {
   const paused = getSetting(ctx.db, "autopilot.paused") === "1";
   const kinds = Object.fromEntries(AUTO_KINDS.map((k) => [k, getSetting(ctx.db, `autopilot.${k}`) === "auto"])) as Record<AutoKind, boolean>;
-  const perHour = Number(getSetting(ctx.db, "autopilot.perHour") ?? DEFAULT_PER_HOUR) || DEFAULT_PER_HOUR;
-  const perDay = Number(getSetting(ctx.db, "autopilot.perDay") ?? DEFAULT_PER_DAY) || DEFAULT_PER_DAY;
-  return { paused, kinds, perHour, perDay, ...usage(ctx) };
+  const limit = (key: string, fallback: number, max: number) => {
+    const n = Math.floor(Number(getSetting(ctx.db, key) ?? fallback));
+    return Number.isFinite(n) && n >= 1 ? Math.min(n, max) : fallback;
+  };
+  const perHour = limit("autopilot.perHour", DEFAULT_PER_HOUR, MAX_PER_HOUR);
+  const perDay = Math.max(limit("autopilot.perDay", DEFAULT_PER_DAY, MAX_PER_DAY), perHour);
+  return { paused, kinds, perHour, perDay, maxPerHour: MAX_PER_HOUR, maxPerDay: MAX_PER_DAY, ...usage(ctx) };
 }
 
 /** Automatic actions in the last hour and day (counted from the actions themselves, so a restart can't reset the budget). */
@@ -100,9 +110,22 @@ function usage(ctx: Ctx) {
 }
 
 /** The owner's choice per kind (only from the Settings page: never from a request's words). */
-export function setAutopilot(ctx: Ctx, input: { kind?: AutoKind; enabled?: boolean; paused?: boolean }) {
+export function setAutopilot(ctx: Ctx, input: { kind?: AutoKind; enabled?: boolean; paused?: boolean; perHour?: number; perDay?: number }) {
   const kindChange = Boolean(input.kind && (AUTO_KINDS as readonly string[]).includes(input.kind) && input.enabled !== undefined);
-  if (!kindChange && input.paused === undefined) throw new AutopilotError("Say which kind to turn on or off, or whether to pause");
+  const limits = input.perHour !== undefined || input.perDay !== undefined;
+  if (!kindChange && input.paused === undefined && !limits) throw new AutopilotError("Say which kind to turn on or off, or whether to pause");
+  if (limits) {
+    const now = autopilotStatus(ctx);
+    const perHour = input.perHour ?? now.perHour;
+    const perDay = input.perDay ?? now.perDay;
+    if (!Number.isInteger(perHour) || perHour < 1 || perHour > MAX_PER_HOUR) throw new AutopilotError(`The hourly limit must be a whole number from 1 to ${MAX_PER_HOUR}`);
+    if (!Number.isInteger(perDay) || perDay < 1 || perDay > MAX_PER_DAY) throw new AutopilotError(`The daily limit must be a whole number from 1 to ${MAX_PER_DAY}`);
+    if (perDay < perHour) throw new AutopilotError("The daily limit can't be lower than the hourly one");
+    setSetting(ctx.db, "autopilot.perHour", String(perHour));
+    setSetting(ctx.db, "autopilot.perDay", String(perDay));
+    logActivity(ctx, { actor: "user", kind: "system", outcome: "info", summary: `Autopilot limits: at most ${perHour} an hour and ${perDay} a day` });
+    if (!kindChange && input.paused === undefined) return autopilotStatus(ctx);
+  }
   if (kindChange) setSetting(ctx.db, `autopilot.${input.kind}`, input.enabled ? "auto" : "ask");
   if (input.paused !== undefined) setSetting(ctx.db, "autopilot.paused", input.paused ? "1" : "0");
   logActivity(ctx, {

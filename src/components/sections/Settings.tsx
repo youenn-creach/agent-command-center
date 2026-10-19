@@ -687,6 +687,7 @@ function AutopilotCard({ state, refresh }: SectionProps) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const a = state.autopilot;
+  const [limits, setLimits] = useState({ perHour: a.perHour, perDay: a.perDay });
   const save = async (body: Record<string, unknown>, done: string) => {
     setBusy(true);
     try {
@@ -719,6 +720,19 @@ function AutopilotCard({ state, refresh }: SectionProps) {
       <p className="mt-3 rounded-md bg-panel-2 px-2.5 py-2 text-xs text-muted">
         Always asks first: anything taken from an email or a web page, anything that sends, deletes, pays or changes access, a time that could mean two things (“at 9”), events more than 60 days away or longer than 12 hours. At most {a.perHour} automatic actions an hour and {a.perDay} a day (used: {a.lastHour} this hour, {a.lastDay} today). Reminders you ask for are added at once, as always.
       </p>
+      <div className="mt-3 grid grid-cols-2 gap-3 sm:max-w-sm">
+        <Field label={`Per hour (1–${a.maxPerHour})`}>
+          <input type="number" min={1} max={a.maxPerHour} className={inputCls} value={limits.perHour} onChange={(e) => setLimits({ ...limits, perHour: Math.max(1, Math.min(a.maxPerHour, Math.floor(Number(e.target.value)) || 1)) })} />
+        </Field>
+        <Field label={`Per day (1–${a.maxPerDay})`}>
+          <input type="number" min={1} max={a.maxPerDay} className={inputCls} value={limits.perDay} onChange={(e) => setLimits({ ...limits, perDay: Math.max(1, Math.min(a.maxPerDay, Math.floor(Number(e.target.value)) || 1)) })} />
+        </Field>
+      </div>
+      {(limits.perHour !== a.perHour || limits.perDay !== a.perDay) && (
+        <Button className="mt-2" variant="primary" busy={busy} disabled={limits.perDay < limits.perHour} onClick={() => save(limits, `Autopilot limits: ${limits.perHour} an hour, ${limits.perDay} a day`)}>
+          {limits.perDay < limits.perHour ? "The daily limit can't be lower than the hourly one" : "Save limits"}
+        </Button>
+      )}
       <div className="mt-3 flex items-center gap-2">
         <Button variant={a.paused ? "primary" : "ghost"} busy={busy} onClick={() => save({ paused: !a.paused }, a.paused ? "Autopilot resumed" : "Autopilot paused: everything asks first")}>
           {a.paused ? "Resume autopilot" : "Pause autopilot"}

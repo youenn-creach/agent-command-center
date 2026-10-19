@@ -82,7 +82,7 @@ export function parseEventRequest(text: string, now: Date, tz: string, defaultMi
   // "at half past four", "at seven": clock hours written as words become digits, only where a time ends ("at Seven Seas"
   // stays a name).
   const HOUR_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
-  let s = ` ${normalizeDayWords(text).replace(/\s+/g, " ").trim()} `.replace(/\b(at|half past)\s+(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b(?=\s*(?:$|[,.;!?]|(?:am|pm|o'?clock|tonight|tomorrow|today|on|to|and|in the|this|next|(?:mon|tues|wednes|thurs|fri|satur|sun)day)\b))/gi, (_m, w: string, n: string) => `${w} ${HOUR_WORDS[n.toLowerCase()]}`);
+  let s = ` ${normalizeDayWords(text).replace(/\s+/g, " ").trim()} `.replace(/\b(at|half past|quarter past|quarter to)\s+(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b(?=\s*(?:$|[,.;!?]|(?:am|pm|o'?clock|tonight|tomorrow|today|on|to|and|in the|this|next|(?:mon|tues|wednes|thurs|fri|satur|sun)day)\b))/gi, (_m, w: string, n: string) => `${w} ${HOUR_WORDS[n.toLowerCase()]}`);
   const take = (re: RegExp) => {
     const m = s.match(re);
     if (m) s = s.replace(m[0], " ");
@@ -129,6 +129,7 @@ export function parseEventRequest(text: string, now: Date, tz: string, defaultMi
       start = toMinutes(single[1], single[2], single[3]);
       if (start === null) return { error: "That time doesn't look right. Try “3pm” or “15:00”." };
     } else if ((m0 = take(/\s(?:at\s+)?half past (\d{1,2})(?=\s)/i))) start = (+m0[1] <= 6 ? +m0[1] + 12 : +m0[1]) * 60 + 30;
+    else if ((m0 = take(/\s(?:at\s+)?quarter (past|to) (\d{1,2})(?=\s)/i))) start = (+m0[2] <= 6 ? +m0[2] + 12 : +m0[2]) * 60 + (m0[1].toLowerCase() === "past" ? 15 : -15);
     else if (take(/\s(?:(?:at|à)\s+)?(?:noon|midday|midi)(?=\s)/i)) start = 12 * 60;
     else if (take(/\s(?:(?:at|à)\s+)?(?:midnight|minuit)(?=\s)/i)) start = 0;
   }
@@ -183,7 +184,9 @@ export function parseEventRequest(text: string, now: Date, tz: string, defaultMi
     let ahead = (target - current + 7) % 7;
     // "next friday" / "vendredi prochain": that day in the following calendar week (weeks start on Monday), as for emails.
     if (/^next$/i.test(m[1] ?? "") || m[3]) ahead = (((8 - current) % 7) || 7) + ((target + 6) % 7);
-    else if (ahead === 0 && !/^(this|ce)$/i.test(m[1] ?? "")) ahead = 7;
+    // An event on today's weekday is next week's ("dentist tuesday 3pm" said on a Tuesday). A reminder for a time later
+    // today is today's ("remind me thursday night to pack", said on Thursday morning).
+    else if (ahead === 0 && !/^(this|ce)$/i.test(m[1] ?? "") && !(defaultMinutes !== undefined && start !== null && start > today.minutes)) ahead = 7;
     date = addDays(today.date, ahead);
   } else if ((m = take(new RegExp(`\\s(?:on\\s+|le\\s+)?(?:the\\s+)?(\\d{1,2})(?:st|nd|rd|th|er)?\\s+(?:of\\s+)?${MONTH_RE}(?:\\s+(\\d{4}))?(?=\\s)`, "i")))) {
     date = withYear(+m[1], monthNumber(m[2]), m[3], today.date);

@@ -95,7 +95,7 @@ Press <kbd>Ctrl</kbd>+<kbd>K</kbd> (or click the prompt bar at the top) and ask 
 | “chase everyone who hasn't answered me” | One polite follow-up per waiting conversation (five at most), each waiting for your approval |
 | “when is the Paris marathon? add it to my calendar” | Finds the date on the web, then prepares the event for your approval |
 | “tell Laura yes for dinner and add it to my calendar” | A reply draft to Laura and the dinner from her email as an event, both for your approval |
-| “who won the final last night?” · “opening hours of the Picasso museum?” | Searches the web privately through your own SearXNG on this computer, reads the top three pages and answers with numbered sources (a few minutes). Off until you give the Knowledge agent Read on **Web search** in Connections & Permissions. Setup: [WEB_SEARCH.md](WEB_SEARCH.md) |
+| “who won the final last night?” · “opening hours of the Picasso museum?” | Searches the web privately through your own SearXNG on this computer, reads the top three pages, keeps the passages that match your question, and answers with numbered sources (about 5 minutes on a laptop CPU). Any figure the sources don't contain is left out, and the answer says so. Off until you give the Knowledge agent Read on **Web search** in Connections & Permissions. Setup: [WEB_SEARCH.md](WEB_SEARCH.md) |
 | “brief me” · “weekly review” · “what's waiting for me?” · “what's scheduled?” · “remember I prefer short replies” | Runs or answers from the dashboard |
 
 Exact commands still work instantly, without the model: `add event: dentist tuesday 3pm`, `draft reply to Ana: sounds good!`, `propose times to Ana`, `remember …`, `trigger Todoist: buy milk`, and French `rdv : dîner chez Julien vendredi 20h`. Dates: `tomorrow`, `friday`, `next tuesday`, `24/10` (day/month), `24 october`, `in 3 days`; times: `3pm`, `15:00`, `15h`, `3-4pm`, `for 45 min`. Without a time, an event lasts all day.
@@ -112,7 +112,7 @@ Off by default: everything waits for your approval. In **Settings → Autopilot*
 
 It still asks first for anything taken from an email or a web page, a time that could mean two things (“at 9”), events more
 than 60 days away or longer than 12 hours, and drafts to someone whose address isn't in your mail; and it stops at 3 automatic
-actions an hour and 10 a day. Everything it does is listed under **Done for you** on Today, with **Undo** (it also appears
+actions an hour and 10 a day (change these on the Autopilot card, up to 10 an hour and 20 a day). Everything it does is listed under **Done for you** on Today, with **Undo** (it also appears
 under the answer in the prompt bar). The **Autopilot on · Pause** button in the header puts everything back to “ask first” at once.
 
 ## Optional: cloud help for understanding requests

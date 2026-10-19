@@ -87,3 +87,16 @@ trips, refusals (all or nearly all right). Weak: calendar questions (5/8) and tw
 Speed: web answers 2.25x faster (707 s -> 314 s, same accuracy on 26 questions); a request now averages 77-104 s.
 Stopped again under the 30% rule. Next levers are not more wording rules but the user's own corrections ("Not right?")
 and, if wanted, the free cloud router for routing only.
+
+## Third pass (night of 2026-10-18/19): general fixes, computed calendar answers
+| Code | Fresh set | Result |
+|---|---|---|
+| c10: v5's general fixes + the review of the day's rules | v6 (60, mixed) | **57/60 (5%)**, two-asks 7/8, calendar 7/8 |
+| c10: calendar questions, rules as they were | cal1 (30) | 21/30 |
+| c10: same, the model answering listed questions (experiment) | cal1 | 22/30, 59 s vs 42 s; it miscounted (2 for 3 events): stays off |
+| c11: calendar answers computed in code (windows, gaps, hours booked, next after) | cal2 (30) | 23/30 |
+| c12: the same, for more wordings | cal3 (30) | **27/30 (10%)** |
+
+v1 dev stayed at 110/110 throughout. Caveat: v6 and cal2-cal3 were written after seeing which kinds of request failed, so
+they may be easier than v3-v5; still, each was written and committed before the code it measured. Lesson: on this 8B,
+counting and time arithmetic belong in code, the model only for understanding and wording.

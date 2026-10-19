@@ -72,6 +72,13 @@ export function parseRange(text: string, now: Date, tz: string): Range {
     const days = new Date(Date.UTC(today.y, today.m, 0)).getUTCDate() - today.d + 1;
     return span(today, days, "the rest of this month");
   }
+  // "between friday and sunday", "from monday to wednesday": the days from the first to the second (within the next week).
+  const days2 = t.match(/\b(?:between|from)\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\s+(?:and|to|until|till|through)\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/);
+  if (days2) {
+    const first = add(today, (WEEKDAYS.indexOf(days2[1]) - weekday(today) + 7) % 7);
+    const len = ((WEEKDAYS.indexOf(days2[2]) - WEEKDAYS.indexOf(days2[1]) + 7) % 7) + 1;
+    return span(first, len, `${fmt(first, tz)} to ${fmt(add(first, len - 1), tz)}`);
+  }
   const wd = t.match(/\b(next|this|on|coming)?\s*(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/);
   if (wd) {
     const target = WEEKDAYS.indexOf(wd[2]);

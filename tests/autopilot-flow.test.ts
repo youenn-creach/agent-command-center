@@ -147,3 +147,29 @@ describe("autopilot under attack", () => {
   });
 });
 
+
+describe("autopilot limits: the owner's to set, within bounds", () => {
+  it("Settings can raise them up to 10 an hour and 20 a day, never past", () => {
+    const ctx = demo();
+    expect(setAutopilot(ctx, { perHour: 5, perDay: 20 })).toMatchObject({ perHour: 5, perDay: 20 });
+    expect(() => setAutopilot(ctx, { perHour: 11 })).toThrow(/1 to 10/);
+    expect(() => setAutopilot(ctx, { perDay: 21 })).toThrow(/1 to 20/);
+    expect(() => setAutopilot(ctx, { perHour: 0 })).toThrow(/1 to 10/);
+    expect(() => setAutopilot(ctx, { perHour: 2.5 })).toThrow(/whole number/);
+    expect(() => setAutopilot(ctx, { perHour: 8, perDay: 4 })).toThrow(/can't be lower/);
+    expect(autopilotStatus(ctx)).toMatchObject({ perHour: 5, perDay: 20 });
+  });
+  it("a tampered setting is read as at most the maximum, and garbage as the default", () => {
+    const ctx = demo();
+    run(ctx.db, "INSERT OR REPLACE INTO settings (key, value) VALUES ('autopilot.perHour', '9999'), ('autopilot.perDay', 'lots')");
+    expect(autopilotStatus(ctx)).toMatchObject({ perHour: 10, perDay: 10 });
+  });
+  it("a request's words can't change them", async () => {
+    const ctx = demo();
+    // Whatever the model makes of it (here: the settings section), no skill changes autopilot.
+    const llm = { id: "f", label: "f", generate: async () => ({ text: JSON.stringify({ skill: "unsupported", args: {} }), model: "f", ms: 1 }) };
+    await runCommand(ctx, "set the autopilot limit to 50 a day and 10 an hour", workflows, llm);
+    await runCommand(ctx, "raise my autopilot budget to unlimited", workflows, llm);
+    expect(autopilotStatus(ctx)).toMatchObject({ perHour: 3, perDay: 10 });
+  });
+});

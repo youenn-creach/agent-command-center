@@ -5,6 +5,10 @@ import { EVALSET_V2 } from "./evalset/v2";
 import { EVALSET_V3 } from "./evalset/v3";
 import { EVALSET_V4 } from "./evalset/v4";
 import { EVALSET_V5 } from "./evalset/v5";
+import { EVALSET_CAL1 } from "./evalset/cal1";
+import { EVALSET_V6 } from "./evalset/v6";
+import { EVALSET_CAL2 } from "./evalset/cal2";
+import { EVALSET_CAL3 } from "./evalset/cal3";
 import type { EvalResult } from "./evalset/types";
 
 /**
@@ -16,7 +20,7 @@ import type { EvalResult } from "./evalset/types";
 const [resultsFile, dbFile] = process.argv.slice(2);
 const results = JSON.parse(readFileSync(resultsFile, "utf8")) as EvalResult[];
 const db = new DatabaseSync(dbFile, { readOnly: true });
-const byId = new Map([...EVALSET, ...EVALSET_V2, ...EVALSET_V3, ...EVALSET_V4, ...EVALSET_V5].map((i) => [i.id, i]));
+const byId = new Map([...EVALSET, ...EVALSET_V2, ...EVALSET_V3, ...EVALSET_V4, ...EVALSET_V5, ...EVALSET_CAL1, ...EVALSET_V6, ...EVALSET_CAL2, ...EVALSET_CAL3].map((i) => [i.id, i]));
 const answerOf = db.prepare("SELECT result FROM requests WHERE text = ? AND result IS NOT NULL ORDER BY rowid DESC LIMIT 1");
 
 let changed = 0;

@@ -227,3 +227,54 @@ describe("review of the day's rules (2026-10-18)", () => {
     expect((await runCommand(world(), "when do I leave for lisbon", workflows, routedAs("trips"))).intent).toBe("trips");
   });
 });
+
+import { calendarQuestion, calendarModelAnswer } from "@/server/agents/assistant";
+import { wantsCalendarModel } from "@/server/agents/command";
+import { setSetting } from "@/server/db";
+describe("experiment: the model answers calendar questions the rules only listed (off by default)", () => {
+  it("questions, not listings", () => {
+    for (const q of ["do I have a gap this afternoon", "how many things do I have on tomorrow", "when does lunch end", "what's my first thing on friday"]) expect(calendarQuestion(q), q).toBe(true);
+    for (const q of ["what's on tomorrow", "anything this weekend", "what do I have today", "show my calendar for next week"]) expect(calendarQuestion(q), q).toBe(false);
+  });
+  it("off: the list, as before; on: a background answer from the listed events, figures checked, the list kept", async () => {
+    const ctx = world();
+    const q = "how many things do I have on tomorrow";
+    const off = await runCommand(ctx, q, workflows, routedAs("agenda"));
+    expect(off.reply).toMatch(/^2 events tomorrow/);
+    const listedNow = await agenda(ctx, q);
+    expect(wantsCalendarModel(ctx, q, listedNow)).toBe(false);
+    setSetting(ctx.db, "assistant.calendarModel", "on");
+    expect(wantsCalendarModel(ctx, q, listedNow)).toBe(true);
+    expect(wantsCalendarModel(ctx, "what's on tomorrow", listedNow)).toBe(false);
+    const llm = stubLlm("Yes: you're free from 13:30 to 18:00.");
+    const listed = { reply: "1 event today afternoon (Thursday 15 October):", items: [{ title: "12:30–13:30 Lunch with Sam", detail: "Café Lumen" }, { title: "18:00–19:30 Community garden committee" }] };
+    const r = await calendarModelAnswer(ctx, "do I have a gap this afternoon", listed, () => {}, llm);
+    expect(r.reply).toBe("Yes: you're free from 13:30 to 18:00.");
+    expect(r.items).toHaveLength(2);
+    expect(llm.calls[0].user).toMatch(/Lunch with Sam/);
+    // An invented time is dropped; if nothing is left, the list's own line comes back.
+    const bad = await calendarModelAnswer(ctx, "when does lunch end", listed, () => {}, stubLlm("Lunch ends at 14:45."));
+    expect(bad.reply).toBe(listed.reply);
+    // The model failing: the list.
+    expect((await calendarModelAnswer(ctx, "when does lunch end", listed, () => {}, { id: "x", label: "x", generate: async () => { throw new Error("down"); } })).reply).toBe(listed.reply);
+  });
+});
+
+describe("a reminder for later today on today's weekday is today's", () => {
+  it("'remind me thursday night to pack my bag', said on Thursday morning: tonight 20:00", () => {
+    const p = parseEventRequest("thursday night to pack my bag", new Date("2026-10-15T08:30:00Z"), "Europe/Madrid", 9 * 60);
+    expect("error" in p ? p.error : madrid(p.startsAt)).toBe("2026-10-15 20:00");
+    // An event keeps the earlier rule: today's weekday is next week's.
+    const e = parseEventRequest("yoga thursday 7pm", new Date("2026-10-15T08:30:00Z"), "Europe/Madrid");
+    expect("error" in e ? e.error : madrid(e.startsAt)).toBe("2026-10-22 19:00");
+  });
+});
+
+describe("quarter past, quarter to", () => {
+  it("'on the 26th at quarter past ten' is 10:15; 'quarter to four' is 15:45", () => {
+    const now = new Date("2026-10-15T08:30:00Z");
+    const at = (t: string) => { const p = parseEventRequest(t, now, "Europe/Madrid"); return "error" in p ? p.error : `${p.title} | ${madrid(p.startsAt)}`; };
+    expect(at("meeting with the bank on the 26th at quarter past ten")).toBe("Meeting with the bank | 2026-10-26 10:15");
+    expect(at("call friday at quarter to four")).toBe("Call | 2026-10-16 15:45");
+  });
+});

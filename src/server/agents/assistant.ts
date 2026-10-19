@@ -345,7 +345,7 @@ export async function agenda(ctx: Ctx, text: string): Promise<SkillAnswer> {
   }
   const named = await namedEventAnswer(ctx, text);
   if (named) return named;
-  const range = parseRange(text, ctx.now(), tz());
+  let range = parseRange(text, ctx.now(), tz());
   const got = await eventsBetween(ctx, range.from, range.to);
   if ("reply" in got) return got;
   let events = got.events;
@@ -353,10 +353,86 @@ export async function agenda(ctx: Ctx, text: string): Promise<SkillAnswer> {
   // "Am I free at 3pm tomorrow": that moment, yes or no.
   const at = freeAtAnswer(text, events, range.from);
   if (at) return at;
+  const listItems = (list: CalEvent[]) => list.map((e) => ({ title: `${hm(e.starts_at)}–${hm(e.ends_at)} ${e.title}`, detail: e.location ?? undefined }));
+  const day0 = localToday(range.from, tz());
+  // "What's between 2pm and 5pm today": the events in that window, or that it's free.
+  const win = text.match(/\bbetween\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon|midday)\s+and\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon|midday)\b/i);
+  if (win) {
+    const [a, b] = [win[1], win[2]].map((w) => clockMinutes(w.match(CLOCK)!));
+    if (a !== null && b !== null && b > a) {
+      const from = zonedToUtc(day0, a, tz()).getTime();
+      const to = zonedToUtc(day0, b, tz()).getTime();
+      const inside = events.filter((e) => Date.parse(e.starts_at) < to && Date.parse(e.ends_at) > from);
+      const label = `${range.label} between ${hm(new Date(from).toISOString())} and ${hm(new Date(to).toISOString())}`;
+      return inside.length ? { reply: `${inside.length} event${inside.length > 1 ? "s" : ""} ${label}:`, items: listItems(inside), section: "today" } : { reply: `Nothing on your calendar ${label}: you're free.`, section: "today" };
+    }
+  }
+  // "What's the gap between the dentist and lunch", "how long do I have between the bike drop-off and the spanish exchange":
+  // the free time from the end of one to the start of the other (other events in between taken out), within two weeks.
+  const between = /\b(?:gap|free|time|break|long|much)\b/i.test(text) ? text.match(/\bbetween\s+(?:the\s+|my\s+)?(.+?)\s+and\s+(?:the\s+|my\s+)?(.+?)\s*(?:today|tomorrow|tonight)?\s*\??$/iu) : null;
+  if (between && !/^\d|^(?:noon|midday)/i.test(between[1].trim())) {
+    const soon = await eventsBetween(ctx, zonedToUtc(localToday(ctx.now(), tz()), 0, tz()), new Date(ctx.now().getTime() + 14 * 86_400_000));
+    const pool = "events" in soon ? soon.events.sort((a, b) => a.starts_at.localeCompare(b.starts_at)) : events;
+    const find = (phrase: string) => {
+      const ws = phrase.toLowerCase().split(/[^\p{L}]+/u).filter((w) => w.length >= 3);
+      const score = (e: CalEvent) => ws.filter((w) => e.title.toLowerCase().includes(w)).length;
+      return pool.filter((e) => score(e) > 0).sort((a, b) => score(b) - score(a))[0];
+    };
+    const [x, y] = [find(between[1]), find(between[2])];
+    if (x && y && x !== y) {
+      const [first, second] = Date.parse(x.starts_at) <= Date.parse(y.starts_at) ? [x, y] : [y, x];
+      const from = Date.parse(first.ends_at);
+      const to = Date.parse(second.starts_at);
+      if (to <= from) return { reply: `No gap: “${second.title}” starts before “${first.title}” ends.`, items: listItems([first, second]), section: "today" };
+      const inside = pool.filter((e) => Date.parse(e.starts_at) < to && Date.parse(e.ends_at) > from && e !== first && e !== second);
+      const spans: [number, number][] = [];
+      let cursor = from;
+      for (const e of inside) {
+        if (Date.parse(e.starts_at) > cursor) spans.push([cursor, Date.parse(e.starts_at)]);
+        cursor = Math.max(cursor, Date.parse(e.ends_at));
+      }
+      if (to > cursor) spans.push([cursor, to]);
+      const free = spans.reduce((n, [a, b]) => n + Math.round((b - a) / 60_000), 0);
+      const shown = spans.map(([a, b]) => `${hm(new Date(a).toISOString())}–${hm(new Date(b).toISOString())}`).join(" and ");
+      return {
+        reply: `${duration(free)} free between “${first.title}” (ends ${hm(first.ends_at)}) and “${second.title}” (${dayLabel(second.starts_at)} ${hm(second.starts_at)}): ${shown}${inside.length ? ` (${inside.map((e) => `“${e.title}”`).join(", ")} in between)` : ""}.`,
+        items: listItems([first, ...inside, second]),
+        section: "today",
+      };
+    }
+  }
+  // "How many hours of appointments do I have today": the time booked, counted in code.
+  if (((/\bhow (?:many hours|much time)\b/i.test(text) && /\b(?:appointments?|meetings?|events?|booked|busy|calendar|scheduled|plans?)\b/i.test(text)) || /\bhow much of (?:today|tomorrow|tonight|my day|the day|this (?:morning|afternoon|evening)|\w+day) is (?:booked|taken|busy|scheduled|full)\b|\bhow (?:booked|busy) am i\b/i.test(text)) && !/\b(?:free|left|spare|available|between)\b/i.test(text)) {
+    const timedOnly = events.filter((e) => Date.parse(e.ends_at) - Date.parse(e.starts_at) < 20 * 3_600_000);
+    const min = timedOnly.reduce((n, e) => n + Math.round((Date.parse(e.ends_at) - Date.parse(e.starts_at)) / 60_000), 0);
+    return { reply: timedOnly.length ? `${duration(min)} booked ${range.label}, in ${timedOnly.length} event${timedOnly.length > 1 ? "s" : ""}.` : `Nothing booked ${range.label}.`, items: listItems(timedOnly), section: "today" };
+  }
+  // "What's after the spanish exchange" (tomorrow), "next event after the long run" (Sunday): with no day named, the event
+  // named after "after"/"before" sets the day, within two weeks.
+  let cut = timeCut(text, events, range.from);
+  const anchorPhrase = text.match(/\b(?:after|before)\s+(?:the\s+|my\s+)?([\p{L}][\p{L}' -]{2,40}?)\s*\??$/iu)?.[1];
+  if (!cut && anchorPhrase && !/\b(?:today|tonight|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|weekend|\d)/i.test(text)) {
+    const soon = await eventsBetween(ctx, zonedToUtc(localToday(ctx.now(), tz()), 0, tz()), new Date(ctx.now().getTime() + 14 * 86_400_000));
+    const ws = anchorPhrase.toLowerCase().split(/[^\p{L}]+/u).filter((w) => w.length >= 3);
+    const anchor = "events" in soon ? soon.events.sort((a, b) => a.starts_at.localeCompare(b.starts_at)).find((e) => ws.some((w) => e.title.toLowerCase().includes(w))) : undefined;
+    if (anchor && "events" in soon) {
+      const d = localToday(new Date(anchor.starts_at), tz());
+      const dayFrom = zonedToUtc(d, 0, tz());
+      range = { from: dayFrom, to: zonedToUtc(d, 24 * 60, tz()), label: `on ${dayLabel(anchor.starts_at)}` };
+      events = soon.events.filter((e) => Date.parse(e.starts_at) < range.to.getTime() && Date.parse(e.ends_at) > dayFrom.getTime());
+      cut = timeCut(text, events, dayFrom);
+    }
+  }
   // "Anything after lunch today", "what's on after 3pm": only what starts after that point.
-  const cut = timeCut(text, events, range.from);
   if (cut) {
     events = events.filter((e) => (cut.after ? Date.parse(e.starts_at) >= cut.at : Date.parse(e.ends_at) <= cut.at));
+    // "What comes after the committee": nothing more that day, so the next event, whenever it is (within a week).
+    if (!events.length && cut.after && /\b(?:comes?|next|what'?s)\b/i.test(text)) {
+      const ahead = await eventsBetween(ctx, new Date(cut.at), new Date(cut.at + 7 * 86_400_000));
+      const next = "events" in ahead ? ahead.events.sort((a, b) => a.starts_at.localeCompare(b.starts_at)).find((e) => Date.parse(e.starts_at) >= cut.at) : undefined;
+      if (next) return { reply: `Nothing more ${range.label} ${cut.label}. Next: “${next.title}”, ${dayLabel(next.starts_at)} at ${hm(next.starts_at)}${next.location ? `, ${next.location}` : ""}.`, items: [{ title: `${dayLabel(next.starts_at)} · ${hm(next.starts_at)}–${hm(next.ends_at)} ${next.title}`, detail: next.location ?? undefined }], section: "today" };
+      return { reply: `Nothing on your calendar ${cut.label} in the next 7 days.`, section: "today" };
+    }
     if (!events.length) return { reply: `Nothing on your calendar ${range.label} ${cut.label}.`, section: "today" };
     return { reply: `${events.length} event${events.length > 1 ? "s" : ""} ${range.label} ${cut.label}:`, items: events.map((e) => ({ title: `${hm(e.starts_at)}–${hm(e.ends_at)} ${e.title}`, detail: e.location ?? undefined })), section: "today" };
   }
@@ -370,7 +446,7 @@ export async function agenda(ctx: Ctx, text: string): Promise<SkillAnswer> {
     ? all<{ sender: string; subject: string; snippet: string }>(ctx.db, `SELECT sender, subject, snippet FROM messages WHERE needs_reply = 1${demoRowsFilter()} AND (${dayNames.map(() => "subject LIKE ? OR snippet LIKE ?").join(" OR ")}) ORDER BY received_at DESC LIMIT 3`, ...dayNames.flatMap((d) => [`%${d}%`, `%${d}%`])).map((m) => ({ title: `Mail: ${m.subject}`, detail: `from ${m.sender.replace(/\s*<[^>]*>/, "")}, waiting for your reply, mentions ${dayNames.find((d) => `${m.subject} ${m.snippet}`.toLowerCase().includes(d.toLowerCase())) ?? dayName}` }))
     : [];
   // "Do I have time for a coffee with Sam before the committee": the free time from now until that event (or the day's end).
-  if (/\b(?:do i have|have i got|is there|got)\s+(?:any\s+)?time\b|\btime for\b|\bam i free\b/i.test(text) && range.to.getTime() - range.from.getTime() <= 86_400_000 + 3_600_000) {
+  if ((/\b(?:do i have|have i got|is there|got)\s+(?:any\s+)?time\b|\btime for\b|\bam i free\b/i.test(text) || /\b(?:gaps?|free (?:slots?|time|window|spells?)|spare time|breaks?|nap)\b/i.test(text)) && range.to.getTime() - range.from.getTime() <= 86_400_000 + 3_600_000) {
     const words = text.toLowerCase().match(/\bbefore\s+(?:the\s+|my\s+)?([\p{L}]{3,})/u)?.[1];
     const limit = words ? events.find((e) => e.title.toLowerCase().includes(words)) : undefined;
     const end = limit ? Date.parse(limit.starts_at) : range.to.getTime();
@@ -391,7 +467,7 @@ export async function agenda(ctx: Ctx, text: string): Promise<SkillAnswer> {
   const clash = (e: (typeof events)[number]) => events.find((o) => o !== e && timed(o) && timed(e) && o.starts_at < e.ends_at && e.starts_at < o.ends_at);
   const clashes = events.filter((e) => clash(e));
   return {
-    reply: `${events.length} event${events.length > 1 ? "s" : ""} ${range.label}:${clashes.length ? ` ⚠ ${clashes.length} overlap.` : /double.?book|overlap|clash|conflict/i.test(text) ? " No overlaps: nothing is double booked." : ""}${/\bwho(?:'s| is| will be| are)? (?:coming|going|attending|there)\b|\battendees?\b/i.test(text) ? " Your calendar doesn't say who is coming." : ""}`,
+    reply: `${events.length} event${events.length > 1 ? "s" : ""} ${range.label}:${clashes.length ? ` ⚠ ${clashes.length} overlap.` : /double.?book|overlap|clash|conflict|same time|at once|simultaneous/i.test(text) ? " No overlaps: nothing is double booked." : ""}${/\bwho(?:'s| is| will be| are)? (?:coming|going|attending|there)\b|\battendees?\b/i.test(text) ? " Your calendar doesn't say who is coming." : ""}`,
     items: [...events.map((e) => {
       const other = clash(e);
       return { title: `${multiDay ? `${dayLabel(e.starts_at)} · ` : ""}${timed(e) ? `${hm(e.starts_at)}–${hm(e.ends_at)}` : "all day"} ${e.title}`, detail: [e.location, other ? `⚠ overlaps with “${other.title}”` : null].filter(Boolean).join(" · ") || undefined };
@@ -401,6 +477,37 @@ export async function agenda(ctx: Ctx, text: string): Promise<SkillAnswer> {
 }
 
 type CalEvent = { title: string; starts_at: string; ends_at: string; location: string | null };
+
+/**
+ * A question about the calendar that the rules only answered with a list ("do I have a gap this afternoon", "how many things
+ * tomorrow", "when does lunch end"). Plain listings ("what's on tomorrow", "anything this weekend") are not questions.
+ */
+export function calendarQuestion(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  if (/^(?:please\s+)?(?:what'?s|what is|what do i have|what have i got|show(?: me)?|list|anything|is there anything|do i have anything|have i got anything|give me)\b.*\b(?:on|planned|happening|calendar|agenda|schedule|week|weekend|today|tomorrow|tonight)\s*\??$/.test(t) && !/\b(?:how many|gap|first|last|earliest|latest|end|finish|start|between)\b/.test(t)) return false;
+  return /\b(?:how many|how much time|how long|gaps?|free|busy|first|last|earliest|latest|start|starts|end|ends|finish|finishes|between|before|after|which|who|where|when|is there|are there|do i|am i|does|will|should|can i)\b/.test(t);
+}
+
+/** The model answers a calendar question from exactly the events the list shows; the list stays under the answer. */
+export async function calendarModelAnswer(ctx: Ctx, text: string, listed: SkillAnswer, progress: (s: string) => void, llm: LlmProvider = localLlm(ctx, "background")): Promise<SkillAnswer> {
+  progress("Reading your calendar to answer…");
+  const now = ctx.now();
+  const today = `${now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: tz() })}, ${hm(now.toISOString())}`;
+  const events = (listed.items ?? []).filter((i) => !/^Mail:/.test(i.title)).map((i) => `- ${i.title}${i.detail ? ` (${i.detail})` : ""}`).join("\n");
+  try {
+    const out = await llm.generate(CALENDAR_SYSTEM, `Now: ${today}.\nCalendar (${listed.reply.replace(/:$/, "")}):\n${events || "- nothing"}\n\nQuestion: ${text}`, { maxTokens: 120, timeoutMs: 600_000 });
+    const reply = groundNumbers(plainAnswer(out.text), `${today} ${events} ${listed.reply}`);
+    return { ...listed, reply: /^I couldn't confirm/.test(reply) ? listed.reply : reply };
+  } catch {
+    return listed;
+  }
+}
+
+const CALENDAR_SYSTEM = [
+  "You answer the user's question about their calendar using ONLY the events listed (times are local, HH:MM, 24-hour).",
+  "Answer in one or two short sentences, with the times. A gap or free time is time with no event. Count events exactly.",
+  "If the events don't answer the question, say so in one sentence. Never invent an event, a place or a person.",
+].join("\n");
 
 /** The user's events between two instants (Google Calendar when connected, the demo calendar when shown). */
 export async function eventsBetween(ctx: Ctx, from: Date, to: Date): Promise<{ events: CalEvent[] } | SkillAnswer> {
@@ -434,7 +541,7 @@ export async function eventsBetween(ctx: Ctx, from: Date, to: Date): Promise<{ e
 }
 
 // Words that say what kind of question it is, or when; what is left names the event ("spanish exchange", "long runs").
-const QUESTION_WORDS = new Set("where when what which who how is are am do does did i my me the a an on at in of to for and or it its s re there any anything today tomorrow tonight yesterday week weekend next this coming time times day days date long until till calendar agenda schedule event events meeting meetings appointment appointments plan plans planned happening going have has get got usually usual always".split(" "));
+const QUESTION_WORDS = new Set("where when what which who how is are am do does did i my me the a an on at in of to for and or it its s re there any anything exactly actually again please roughly today tomorrow tonight yesterday week weekend next this coming time times day days date long until till calendar agenda schedule event events meeting meetings appointment appointments plan plans planned happening going have has get got usually usual always".split(" "));
 const WEEKDAY_WORDS = /^(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)s?$/;
 
 /**
@@ -445,7 +552,8 @@ const WEEKDAY_WORDS = /^(?:monday|tuesday|wednesday|thursday|friday|saturday|sun
 export async function namedEventAnswer(ctx: Ctx, text: string, strict = false): Promise<SkillAnswer | null> {
   const where = /\bwhere(?:'s| is| are| was)?\b/i.test(text);
   const when = /\b(?:when(?:'s| is| are| was)?|what time|which days?|what days?|today or tomorrow|tomorrow or today|how long (?:is|does|will|do)|until when|till when)\b/i.test(text);
-  if (!(where || when) || /\b(?:time for|free|busy|available)\b/i.test(text)) return null;
+  // "Where am I going after lunch": what comes after it (timeCut), not where lunch is.
+  if (!(where || when) || /\b(?:time for|free|busy|available)\b/i.test(text) || /\b(?:after|before)\s+(?:the\s+|my\s+)?[\p{L}\d]/iu.test(text)) return null;
   const words = text.toLowerCase().replace(/[’']s\b/g, "").split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 2 && !QUESTION_WORDS.has(w) && !WEEKDAY_WORDS.test(w)).map(stem);
   if (!words.length) return null;
   const today = localToday(ctx.now(), tz());
@@ -500,6 +608,9 @@ export async function namedEventAnswer(ctx: Ctx, text: string, strict = false): 
   return { reply: `“${first.title}”: ${relDay(first.starts_at)} (${dayLabel(first.starts_at)}) at ${span}${first.location ? `, ${first.location}` : ""}${over}.`, items, section: "today" };
 }
 
+/** "4 h 30 min", "2 hours", "45 minutes". */
+const duration = (min: number) => (min < 60 ? `${min} minutes` : min % 60 === 0 ? `${min / 60} hour${min === 60 ? "" : "s"}` : `${Math.floor(min / 60)} h ${min % 60} min`);
+
 const CLOCK = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b|\b(noon|midday)\b/i;
 const clockMinutes = (m: RegExpMatchArray): number | null => {
   if (m[4]) return 12 * 60;
@@ -516,7 +627,8 @@ const clockMinutes = (m: RegExpMatchArray): number | null => {
 /** "Am I free at 3pm tomorrow", "check if I'm free at 15:00 on friday": that moment on the asked day, yes or no. */
 function freeAtAnswer(text: string, events: CalEvent[], dayStart: Date): SkillAnswer | null {
   if (!/\b(?:free|available|busy)\b/i.test(text)) return null;
-  const m = text.match(new RegExp(`\\bat\\s+(?:${CLOCK.source})`, "i"));
+  // "free at 3pm", and "is 4pm tomorrow free" (a time with am/pm or minutes, without "at").
+  const m = text.match(new RegExp(`\\bat\\s+(?:${CLOCK.source})`, "i")) ?? text.match(/\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|\b\d{1,2}:\d{2}\b/i)?.[0].match(CLOCK) ?? null;
   if (!m) return null;
   const minutes = clockMinutes(m);
   if (minutes === null) return null;
