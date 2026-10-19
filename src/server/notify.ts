@@ -58,7 +58,13 @@ export function notificationSettings(ctx: Ctx) {
       ntfyHost = null;
     }
   }
-  const kinds = JSON.parse(getSetting(ctx.db, "notify.kinds") ?? JSON.stringify(NOTIFY_KINDS)) as NotifyKind[];
+  let kinds: NotifyKind[] = [...NOTIFY_KINDS];
+  try {
+    const stored = JSON.parse(getSetting(ctx.db, "notify.kinds") ?? "null") as unknown;
+    if (Array.isArray(stored)) kinds = stored.filter((k): k is NotifyKind => (NOTIFY_KINDS as readonly string[]).includes(k));
+  } catch {
+    // a damaged setting: the defaults
+  }
   return { desktop: getSetting(ctx.db, "notify.desktop") === "1", details: getSetting(ctx.db, "notify.details") === "1", kinds, ntfyHost };
 }
 

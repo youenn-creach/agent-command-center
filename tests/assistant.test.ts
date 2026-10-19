@@ -90,6 +90,7 @@ describe("your data: export and clear", () => {
     const out = exportUserData(ctx);
     expect(out.aboutMe).toMatchObject([{ text: "I prefer short replies" }]);
     expect(out.requests).toMatchObject([{ text: "what's scheduled?" }]);
+    expect(Array.isArray(out.reminders)).toBe(true);
     expect(JSON.stringify(out)).not.toMatch(/token|secret|ciphertext/i);
     await clearUserData(ctx);
     expect(all(ctx.db, "SELECT * FROM memory_facts")).toEqual([]);

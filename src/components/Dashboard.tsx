@@ -244,9 +244,9 @@ function DashboardInner() {
           <button className="rounded-lg border border-line px-2 py-1 text-sm md:hidden" onClick={() => setNavOpen(true)} aria-label="Open navigation">
             ☰
           </button>
-          <h1 className="hidden text-sm font-medium text-muted lg:block">{SECTIONS.find((s) => s.id === section)?.label}</h1>
+          <h1 className="hidden shrink-0 whitespace-nowrap text-sm font-medium text-muted lg:block">{SECTIONS.find((s) => s.id === section)?.label}</h1>
           <CommandBar go={go} refresh={refresh} />
-          <div className="ml-auto flex flex-wrap items-center gap-2">
+          <div className="ml-auto flex flex-wrap items-center gap-2 lg:shrink-0 lg:flex-nowrap">
             {state && <AutopilotSwitch state={state} refresh={refresh} />}
             <ThemeToggle />
             {state?.config.mode === "personal" ? (

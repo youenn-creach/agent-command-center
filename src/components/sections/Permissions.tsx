@@ -1,10 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { post } from "../api";
+import { LEVELS, LEVEL_LABEL, post, relative } from "../api";
 import type { SectionProps } from "../Dashboard";
 import { Badge, Button, Card, SectionHeader, useSimpleMode, useToast } from "../ui";
-import { LEVELS, LEVEL_LABEL, relative } from "../api";
 import { ServiceIcon, serviceLight, StatusLight } from "../icons";
 
 /** One colour per level, so the matrix reads at a glance (the label is always shown too). */
@@ -25,9 +24,7 @@ export function PermissionsView({ state, refresh }: SectionProps) {
   async function change(body: Record<string, unknown>, key: string, ok: string) {
     setBusy(key);
     try {
-      const res = await fetch("/api/permissions", { method: "POST", headers: { "content-type": "application/json", "x-acc-request": "1" }, body: JSON.stringify(body) });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      await post("/api/permissions", body);
       toast(ok, "ok");
     } catch (e) {
       toast((e as Error).message, "danger");

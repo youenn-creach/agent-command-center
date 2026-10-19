@@ -27,8 +27,14 @@ export function activeLlmCalls(ctx: Ctx): LlmCall[] {
   const now = Date.now();
   const calls: LlmCall[] = [];
   for (const row of all<{ key: string; value: string }>(ctx.db, "SELECT key, value FROM settings WHERE key LIKE 'llm.call.%'")) {
-    const call = JSON.parse(row.value) as LlmCall;
-    if (now - Date.parse(call.startedAt) > STALE_MS) run(ctx.db, "DELETE FROM settings WHERE key = ?", row.key);
+    let call: LlmCall | null = null;
+    try {
+      call = JSON.parse(row.value) as LlmCall;
+    } catch {
+      // A damaged row (an interrupted write) must not break every dashboard refresh: drop it.
+    }
+    const started = call ? Date.parse(call.startedAt) : NaN;
+    if (!call || !Number.isFinite(started) || now - started > STALE_MS) run(ctx.db, "DELETE FROM settings WHERE key = ?", row.key);
     else calls.push(call);
   }
   return calls;

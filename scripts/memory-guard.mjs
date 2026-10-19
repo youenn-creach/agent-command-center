@@ -110,7 +110,9 @@ async function unloadModels() {
     names = models.map((m) => `${m.name} (${m.gb.toFixed(1)} GB)`);
     await Promise.all(models.map((m) => fetch(`${OLLAMA}/api/generate`, { method: "POST", body: JSON.stringify({ model: m.name, keep_alive: 0 }), signal: AbortSignal.timeout(5000) }).catch(() => null)));
     await new Promise((r) => setTimeout(r, 3000));
-    if (!(await loadedModels()).length) return { names, how: "unloaded" };
+    // Ollama may report nothing loaded while a runner still holds the memory (it lingers after an unload, as at 03:27 on
+    // 2026-10-19 with 5.1 GB): only then is the job done.
+    if (!(await loadedModels()).length && !runnerPids().length) return { names, how: "unloaded" };
   } catch {
     // Ollama too slow to answer: fall through
   }
@@ -122,7 +124,7 @@ async function unloadModels() {
       // already gone
     }
   }
-  return { names: names.length ? names : pids.length ? ["the model runner"] : [], how: pids.length ? "stopped the model runner" : "nothing loaded" };
+  return { names: names.length ? names : pids.length ? ["an idle model runner"] : [], how: pids.length ? "stopped the model runner" : "nothing loaded" };
 }
 
 async function main() {

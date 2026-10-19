@@ -12,6 +12,7 @@ export function exportUserData(ctx: Ctx) {
     aboutMe: all(ctx.db, "SELECT text, created_at, updated_at FROM memory_facts ORDER BY created_at"),
     requests: all(ctx.db, "SELECT text, intent, reply, created_at FROM requests ORDER BY created_at"),
     corrections: all(ctx.db, "SELECT text, wrong, chosen, created_at FROM route_corrections ORDER BY created_at"),
+    reminders: all(ctx.db, "SELECT text, due_at, done_at, source, created_at FROM reminders ORDER BY created_at"),
   };
 }
 

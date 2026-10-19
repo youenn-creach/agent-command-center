@@ -48,6 +48,9 @@ export function isPrivateAddress(ip: string): boolean {
     const v = ip.toLowerCase();
     const mapped = v.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
     if (mapped) return isPrivateAddress(mapped[1]);
+    // Other forms that carry an IPv4 address, or reach this machine: IPv4-mapped in hex, IPv4-compatible (::a.b.c.d),
+    // 6to4 (2002::/16), Teredo (2001:0::/32). None is a normal public web server: refused.
+    if (v.startsWith("::ffff:") || /^::[\d.]+$/.test(v) || v.startsWith("2002:") || /^2001:0?:/.test(v)) return true;
     return v === "::" || v === "::1" || /^f[cd]/.test(v) || /^fe[89ab]/.test(v) || v.startsWith("ff") || v.startsWith("64:ff9b:") || v.startsWith("2001:db8");
   }
   return true; // not an IP at all: refuse

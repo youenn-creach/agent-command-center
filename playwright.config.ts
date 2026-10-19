@@ -37,7 +37,9 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command: `rm -rf "${dataDir}" && mkdir -p "${dataDir}" && ${importEval}npx next start -H 127.0.0.1 -p 3100`,
+    // Screenshots also run the scheduler worker, as the real app does (otherwise Schedules shows "the worker is not running"),
+    // started after the server has seeded the data. It is in the server's process group, so it stops with it.
+    command: `rm -rf "${dataDir}" && mkdir -p "${dataDir}" && ${importEval}${shots ? "(sleep 20; exec npx tsx scripts/worker.mts > /dev/null 2>&1) & " : ""}npx next start -H 127.0.0.1 -p 3100`,
     url: "http://127.0.0.1:3100/api/state",
     reuseExistingServer: false,
     timeout: 60_000,

@@ -73,7 +73,7 @@ export function CommandBar({ go, refresh }: { go: Go; refresh: () => Promise<voi
 
   return (
     // Phones: the bar gets its own row under the header (it is the main way in); wider screens: inline.
-    <div className="relative order-last w-full basis-full md:order-none md:max-w-2xl md:basis-auto">
+    <div className="relative order-last w-full basis-full md:order-none md:min-w-0 md:max-w-2xl md:flex-1 md:basis-auto">
       <form
         onSubmit={(e) => {
           e.preventDefault();

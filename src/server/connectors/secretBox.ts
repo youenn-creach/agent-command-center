@@ -28,7 +28,12 @@ function loadKey(): Buffer {
   const file = keyPath();
   if (!existsSync(file)) {
     mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    writeFileSync(file, randomBytes(32).toString("base64"), { mode: 0o600, flag: "wx" });
+    try {
+      writeFileSync(file, randomBytes(32).toString("base64"), { mode: 0o600, flag: "wx" });
+    } catch (err) {
+      // The web server and the worker started together and the other one wrote it first: use theirs.
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
   }
   chmodSync(file, 0o600);
   const key = Buffer.from(readFileSync(file, "utf8").trim(), "base64");

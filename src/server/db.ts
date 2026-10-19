@@ -238,8 +238,26 @@ export function defaultDbPath(): string {
   return path.join(process.env.ACC_DATA_DIR ?? path.join(process.cwd(), "data"), "acc.sqlite");
 }
 
-/** Runs fn inside an IMMEDIATE transaction so concurrent processes (web + worker) serialize writes. */
+let savepoints = 0;
+/**
+ * Runs fn inside an IMMEDIATE transaction so concurrent processes (web + worker) serialize writes. Called inside another
+ * transaction, it uses a savepoint instead (SQLite has no nested BEGIN): still all-or-nothing, never "cannot start a
+ * transaction within a transaction".
+ */
 export function tx<T>(db: Db, fn: () => T): T {
+  if ((db as { isTransaction?: boolean }).isTransaction === true) {
+    const name = `acc_sp_${++savepoints}`;
+    db.exec(`SAVEPOINT ${name}`);
+    try {
+      const out = fn();
+      db.exec(`RELEASE ${name}`);
+      return out;
+    } catch (err) {
+      db.exec(`ROLLBACK TO ${name}`);
+      db.exec(`RELEASE ${name}`);
+      throw err;
+    }
+  }
   db.exec("BEGIN IMMEDIATE");
   try {
     const out = fn();

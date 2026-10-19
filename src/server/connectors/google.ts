@@ -224,8 +224,8 @@ const ALLOWED_REQUESTS: Record<GoogleServiceId, { method: string; host: string; 
     // Undo of an autopilot draft: deletes that one draft (by the id Gmail returned when the app created it). Never a sent message.
     { method: "DELETE", host: "gmail.googleapis.com", path: /^\/gmail\/v1\/users\/me\/drafts\/[\w-]{1,64}$/ },
   ],
-  // Create the app's own calendar once, then insert events into it. Never "primary", no reads,
-  // updates or deletes (and the scope itself only reaches calendars the app created).
+  // Create the app's own calendar once, insert events into it, and delete one event it made (Undo). Never "primary", no
+  // reads or updates (and the scope itself only reaches calendars the app created).
   "google-calendar-app": [
     { method: "POST", host: "www.googleapis.com", path: /^\/calendar\/v3\/calendars$/ },
     // Only a secondary calendar id (xxxx@group.calendar.google.com). Your primary calendar's id is your
