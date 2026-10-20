@@ -6,7 +6,7 @@ import { type Ctx } from "../db";
 import { logActivity } from "../activity";
 import { callTool } from "../tools/registry";
 import { RunBudget } from "../tools/budget";
-import { fenceUntrusted, localLlm, UNTRUSTED_DATA_RULES, type LlmProvider } from "../llm";
+import { fenceUntrusted, workLlm, UNTRUSTED_DATA_RULES, type LlmProvider } from "../llm";
 import { injectionFlags, isAiDirected } from "../retrieval/text";
 import { parseSender } from "./chiefOfStaff";
 
@@ -125,7 +125,7 @@ const TRIAGE_SCHEMA = { type: "object", properties: { pick: { type: "array", ite
 const MAX_READ = 15;
 
 /** Reviews the last `days` of inbox mail. `progress` is called as it goes ("Reading 3 of 12…"). */
-export async function reviewInbox(ctx: Ctx, days: number, progress: (s: string) => void = () => {}, llm: LlmProvider = localLlm(ctx, "background"), maxEmails = 30, folder: "in:inbox" | "in:spam" = "in:inbox"): Promise<ReviewOutcome> {
+export async function reviewInbox(ctx: Ctx, days: number, progress: (s: string) => void = () => {}, llm: LlmProvider = workLlm(ctx, "background"), maxEmails = 30, folder: "in:inbox" | "in:spam" = "in:inbox"): Promise<ReviewOutcome> {
   const span = Math.min(Math.max(Math.round(days) || 7, 1), 30);
   progress(folder === "in:spam" ? "Listing your spam…" : "Listing your recent emails…");
   const all = await callTool(ctx, "inbox", "gmail.search", { query: `${folder} newer_than:${span}d`, max: 50 }, new RunBudget(1, 120_000));

@@ -90,3 +90,105 @@ describe("cloud help for understanding requests (Mistral API, free tier only)", 
     expect(r2.understood).not.toMatch(/mistral-api/);
   });
 });
+
+import { draftLlmFor, workLlm } from "@/server/llm";
+import { cloudWorker } from "@/server/cloudRouter";
+import { warmRouter } from "@/server/agents/assistant";
+import { dashboardState } from "@/server/state";
+
+/** A fake network: Mistral answers with `status`, the local Ollama answers "local answer". */
+const network = (status: number) => {
+  const calls: string[] = [];
+  vi.stubGlobal("fetch", (async (url: string | URL) => {
+    const u = String(url);
+    calls.push(u);
+    if (u.includes("api.mistral.ai")) return status === 200 ? Response.json({ choices: [{ message: { content: "cloud answer" } }] }) : new Response("{}", { status });
+    if (u.includes("/api/ps")) return Response.json({ models: [] });
+    return Response.json({ message: { content: "local answer" }, done: true });
+  }) as unknown as typeof fetch);
+  return calls;
+};
+
+describe("doing the work in the cloud (Mistral API, free tier only, off by default)", () => {
+  it("is off by default: the work is local, even with a key saved", () => {
+    const ctx = seededCtx();
+    expect(cloudRouterStatus(ctx).work).toEqual({ enabled: false, model: "mistral-medium-latest" });
+    setCloudRouter(ctx, { key: KEY });
+    expect(cloudWorker(ctx)).toBeNull();
+    expect(workLlm(ctx).id).toBe("ollama");
+  });
+
+  it("on: Mistral's model writes, with the local model behind it; the request wording goes to Mistral too", async () => {
+    const ctx = seededCtx();
+    setCloudRouter(ctx, { key: KEY, work: true, workModel: "mistral-large-latest" });
+    const calls = network(200);
+    const llm = workLlm(ctx);
+    expect(llm.id).toBe("mistral-api");
+    expect(llm.model).toBe("mistral-large-latest");
+    const out = await llm.generate("system", "an email to summarize");
+    expect(out.text).toBe("cloud answer");
+    expect(calls.filter((u) => u.includes("api.mistral.ai"))).toHaveLength(1);
+    expect(cloudRouterStatus(ctx).usedToday).toBe(1);
+    // Understanding requests follows: the router uses the cloud too, with the work model when only "work" is on.
+    expect(cloudRouter(ctx)?.model).toBe("mistral-large-latest");
+  });
+
+  it("a refused call falls back to the local model and pauses the cloud until tomorrow", async () => {
+    const ctx = seededCtx();
+    setCloudRouter(ctx, { key: KEY, work: true });
+    network(429);
+    const out = await workLlm(ctx).generate("system", "user");
+    expect(out.text).toBe("local answer");
+    expect(cloudRouterStatus(ctx).blocked).toMatch(/paused until tomorrow/);
+    expect(workLlm(ctx).id).toBe("ollama");
+  });
+
+  it("the daily cap holds inside one task: once reached, the same provider answers locally", async () => {
+    const ctx = seededCtx();
+    setCloudRouter(ctx, { key: KEY, work: true });
+    setSetting(ctx.db, "cloud.router.cap", "2");
+    network(200);
+    const llm = workLlm(ctx);
+    const texts = [];
+    for (let i = 0; i < 3; i++) texts.push((await llm.generate("s", "u")).text);
+    expect(texts).toEqual(["cloud answer", "cloud answer", "local answer"]);
+  });
+
+  it("never in the demo instance; never without a key; removing the key turns both switches off", () => {
+    vi.stubEnv("ACC_MODE", "demo");
+    reloadConfig();
+    const demo = seededCtx();
+    setCloudRouter(demo, { key: KEY, work: true });
+    expect(cloudWorker(demo)).toBeNull();
+    vi.unstubAllEnvs();
+    reloadConfig();
+    const ctx = seededCtx();
+    setCloudRouter(ctx, { key: KEY, work: true, enabled: true });
+    const off = setCloudRouter(ctx, { key: "" });
+    expect(off).toMatchObject({ enabled: false, hasKey: false, work: { enabled: false } });
+  });
+
+  it("drafts in any language stay with the cloud model (no local per-language model swap)", () => {
+    const ctx = seededCtx();
+    setCloudRouter(ctx, { key: KEY, work: true });
+    setSetting(ctx.db, "llm.model.lang.fr", "gemma3:4b");
+    expect(draftLlmFor(ctx, "fr", workLlm(ctx)).id).toBe("mistral-api");
+    setCloudRouter(ctx, { work: false });
+    expect(draftLlmFor(ctx, "fr", workLlm(ctx)).model).toBe("gemma3:4b");
+  });
+
+  it("doesn't load the local model into memory on Ctrl+K while the cloud does the work", () => {
+    const ctx = seededCtx();
+    setCloudRouter(ctx, { key: KEY, work: true });
+    expect(warmRouter(ctx, false)).toEqual({ warming: false });
+  });
+
+  it("the dashboard shows the switch's state, never the key", async () => {
+    const ctx = seededCtx();
+    setCloudRouter(ctx, { key: KEY, work: true });
+    network(200);
+    const state = await dashboardState(ctx);
+    expect(state.cloudRouter.work.enabled).toBe(true);
+    expect(JSON.stringify(state)).not.toContain(KEY);
+  });
+});

@@ -5,7 +5,9 @@ import { modelSplit, modelSplitOn } from "./split";
 import { CHOICE_SKILLS, recordCorrection } from "./corrections";
 import { cloudRouter } from "../cloudRouter";
 import { autoRun, draftFacts, eventFacts } from "../autopilot";
-import { all, type Ctx } from "../db";
+import { all, run, type Ctx } from "../db";
+import { assertNotCancelled, requestSignal, runInRequestScope, RequestCancelledError } from "../requestScope";
+import { UserError } from "../errors";
 import { logActivity } from "../activity";
 import { listJobs, startRunNow, type WorkflowRegistry } from "../scheduler/scheduler";
 import { createHash } from "node:crypto";
@@ -53,6 +55,8 @@ export type Intent =
 export interface CommandResult {
   intent: Intent;
   reply: string;
+  /** Set when the work continues in the background: the id "Cancel" needs. */
+  requestId?: string;
   items?: { title: string; detail?: string }[];
   /** What the request started, so the request board can follow its status. */
   ref?: { actionId?: string; runId?: string };
@@ -349,7 +353,11 @@ export async function runCommand(ctx: Ctx, rawText: string, workflows: WorkflowR
   if (selfCheckOn(ctx) && /·|two requests/.test(result.understood ?? "") && !result.asked && !result.unsupported) result = await withSelfCheck(ctx, text, result, workflows, checker);
   const id = recordRequest(ctx, text, result);
   const { background, ...reply } = result;
-  if (background && id) runInBackground(ctx, id, text, background);
+  if (background && id) {
+    runInBackground(ctx, id, text, background);
+    // The prompt bar offers "Cancel" on work that runs in the background.
+    return { ...reply, requestId: id };
+  }
   return reply;
 }
 
@@ -365,25 +373,50 @@ const BACKGROUND_MAX_MS = 60 * 60_000;
 /** Background work: progress and the final answer go to the request board, plus a notification. */
 export function runInBackground(ctx: Ctx, id: string, text: string, work: NonNullable<CommandResult["background"]>) {
   const ahead = background.pending++;
+  const cancel = new AbortController();
+  cancels.set(id, cancel);
   if (ahead > 0) setRequestProgress(ctx, id, `Waiting for ${ahead === 1 ? "your other request" : `${ahead} other requests`} to finish…`);
   background.tail = background.tail.then(async () => {
     let timer: NodeJS.Timeout | undefined;
     try {
+      // Cancelled while waiting in the queue: it never starts.
+      if (cancel.signal.aborted) return;
       const deadline = new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error("it took more than an hour")), BACKGROUND_MAX_MS);
         timer.unref();
       });
+      const cancelled = new Promise<never>((_, reject) => cancel.signal.addEventListener("abort", () => reject(new RequestCancelledError()), { once: true }));
       setRequestProgress(ctx, id, "Starting…");
-      const out = await Promise.race([work((p) => setRequestProgress(ctx, id, p)), deadline]);
+      // In the request's scope, every model call it makes carries its cancel signal (requestScope.ts).
+      const out = await Promise.race([runInRequestScope(id, cancel.signal, () => work((p) => setRequestProgress(ctx, id, p))), deadline, cancelled]);
       finishRequest(ctx, id, { ok: true, reply: out.reply, items: out.items, actionId: out.actionId });
       void notify(ctx, { key: `answer:${id}`, kind: "answer", title: "Your request is ready", summary: "The Chief of Staff finished a request.", detail: text.slice(0, 120) });
     } catch (err) {
-      finishRequest(ctx, id, { ok: false, reply: `This didn't work: ${err instanceof Error ? err.message.slice(0, 200) : "unknown error"}` });
+      // Cancelled: the board already says so (finishRequest leaves a cancelled request alone anyway).
+      if (!cancel.signal.aborted) finishRequest(ctx, id, { ok: false, reply: `This didn't work: ${err instanceof Error ? err.message.slice(0, 200) : "unknown error"}` });
     } finally {
       clearTimeout(timer);
+      cancels.delete(id);
       background.pending--;
     }
   });
+}
+
+/** Cancel controllers of the background requests this process runs or has queued, by request id. */
+const cancels = ((globalThis as { __accCancels?: Map<string, AbortController> }).__accCancels ??= new Map());
+
+/**
+ * "Cancel" on a request that is still working or waiting its turn: the board says Cancelled at once, a model call in progress
+ * for it stops (local or cloud), it creates nothing more, and the next request in the queue starts. Other work is untouched.
+ */
+export function cancelRequest(ctx: Ctx, id: string) {
+  const row = one<{ status: string | null; text: string }>(ctx.db, "SELECT status, text FROM requests WHERE id = ?", id);
+  if (!row) throw new UserError("This request no longer exists.", 404);
+  if (row.status !== "working") throw new UserError("This request has already finished.", 409);
+  run(ctx.db, "UPDATE requests SET status = 'cancelled', progress = NULL, reply = 'Cancelled by you.', result = NULL WHERE id = ? AND status = 'working'", id);
+  cancels.get(id)?.abort();
+  logActivity(ctx, { actor: "user", kind: "system", outcome: "info", summary: `Cancelled a request: “${row.text.slice(0, 80)}”` });
+  return { ok: true };
 }
 
 /** Commands with an exact form ("add event: …", "draft reply to Ana: …") run without the model. */
@@ -584,13 +617,21 @@ async function handle(ctx: Ctx, text: string, workflows: WorkflowRegistry, llm?:
   try {
     // Optional cloud help for understanding (Mistral API, free tier, request wording only): any failure falls back to the local model.
     const cloud = llm ? null : cloudRouter(ctx);
-    route = cloud ? await routeRequest(ctx, text, cloud, peopleOnce()).catch(() => routeRequest(ctx, text, llm, peopleOnce())) : await routeRequest(ctx, text, llm, peopleOnce());
+    route = cloud
+      ? await routeRequest(ctx, text, cloud, peopleOnce()).catch((err) => {
+          if (requestSignal()?.aborted) throw err;
+          return routeRequest(ctx, text, llm, peopleOnce());
+        })
+      : await routeRequest(ctx, text, llm, peopleOnce());
   } catch (err) {
+    // Cancelled while it was being understood: stop here, no keyword guess.
+    if (requestSignal()?.aborted) throw new RequestCancelledError();
     // No local model: fall back to keywords, and say so rather than guessing silently.
     const r = await runIntent(ctx, text, fast, workflows);
     const why = err instanceof Error ? err.message.slice(0, 120) : "unavailable";
     return { ...r, understood: "keywords (local model unavailable)", reply: fast.intent === "help" ? `I couldn't understand this one: the local model isn't available (${why}). ${HELP}` : r.reply };
   }
+  assertNotCancelled();
   return { ...(await runSkill(ctx, text, route, workflows)), skill: route.skill, understood: `${route.model} · ${Math.round(route.ms / 1000)} s` };
 }
 

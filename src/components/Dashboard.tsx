@@ -247,6 +247,7 @@ function DashboardInner() {
           <h1 className="hidden shrink-0 whitespace-nowrap text-sm font-medium text-muted lg:block">{SECTIONS.find((s) => s.id === section)?.label}</h1>
           <CommandBar go={go} refresh={refresh} />
           <div className="ml-auto flex flex-wrap items-center gap-2 lg:shrink-0 lg:flex-nowrap">
+            {state && <CloudSwitch state={state} refresh={refresh} toast={toast} />}
             {state && <AutopilotSwitch state={state} refresh={refresh} />}
             <ThemeToggle />
             {state?.config.mode === "personal" ? (
@@ -331,6 +332,44 @@ function RuntimeModels({ state, simple, onOpen }: { state: DashboardState; simpl
 }
 
 /** The kill switch: shown when autopilot is on for any kind; one click returns everything to "Ask first". */
+/**
+ * "Do the work in the cloud" in one click, for when more thinking power is needed. Shown once a Mistral key is saved (never in
+ * the demo). Settings explains what is sent; the tooltip repeats it.
+ */
+function CloudSwitch({ state, refresh, toast }: { state: DashboardState; refresh: () => Promise<void>; toast: (msg: string, tone?: "ok" | "warn" | "danger") => void }) {
+  const [busy, setBusy] = useState(false);
+  const c = state.cloudRouter;
+  if (state.config.mode === "demo" || !c.hasKey) return null;
+  const on = c.work.enabled;
+  const paused = on && Boolean(c.blocked);
+  const toggle = async () => {
+    setBusy(true);
+    try {
+      await post("/api/settings", { op: "cloud-router", work: !on });
+      toast(on ? "Back to the local model: nothing leaves this computer" : `Mistral’s cloud (${c.work.model}) now does the work`, on ? "ok" : "warn");
+      await refresh();
+    } catch (e) {
+      toast((e as Error).message, "danger");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <button
+      onClick={toggle}
+      disabled={busy}
+      title={
+        on
+          ? `Mistral’s cloud (${c.work.model}) does the work: the text each task needs, emails included, is sent to Mistral.${paused ? ` Not used right now: ${c.blocked}.` : ""} Click to go back to the local model.`
+          : "The local model does the work; nothing leaves this computer. Click to let Mistral’s cloud do it (more thinking power; the text each task needs, emails included, is sent to Mistral)."
+      }
+      className={on ? "rounded-full border border-warn px-2 py-0.5 text-[11px] font-medium text-warn" : "rounded-full border border-line px-2 py-0.5 text-[11px] font-medium text-muted hover:text-ink"}
+    >
+      {on ? (paused ? "Cloud paused · Local" : "Cloud model · Back to local") : "Local model · Use cloud"}
+    </button>
+  );
+}
+
 function AutopilotSwitch({ state, refresh }: { state: DashboardState; refresh: () => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const a = state.autopilot;

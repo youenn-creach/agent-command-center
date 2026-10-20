@@ -1,3 +1,4 @@
+import { assertNotCancelled } from "./requestScope";
 import { all, one, run, type Ctx } from "./db";
 import { randomUUID } from "node:crypto";
 import { logActivity } from "./activity";
@@ -29,6 +30,7 @@ function get(ctx: Ctx, id: string) {
 /** A reminder the user adds themselves (e.g. "Remind me" on a booking): their own action, no approval needed. */
 /** `source` says what the reminder came from (e.g. "booking"), for the Impact card. */
 export function addReminder(ctx: Ctx, text: string, dueAt?: string, source?: string) {
+  assertNotCancelled(); // nothing new for a request the owner cancelled
   const clean = text.trim().slice(0, 500);
   if (!clean) throw new ReminderError("Write the reminder first");
   const id = `rem_${randomUUID()}`;

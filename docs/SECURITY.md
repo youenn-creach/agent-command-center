@@ -27,7 +27,7 @@ This document lists what is protected, from whom, how, and what is **not** cover
 | Server → internet (RSS) | SSRF to internal services or cloud metadata | https on port 443 only; no IP literals or local hostnames. Every resolved address is checked **at connect time** (blocks private, loopback, link-local and metadata ranges, and DNS rebinding). Each redirect hop is re-validated. Responses are size-capped and time-limited, and DTDs are refused |
 | Server → Google | Over-broad access, token theft, mail content leaking | PKCE with a one-time 10-minute state. The granted scopes must exactly match the request (otherwise the token is revoked). Read-only scopes only, and services are capped at Read. Message bodies are read only on demand (one message, to draft a reply), passed fenced to the **local** model, and never stored, logged or sent to a cloud service. API calls go only to fixed hosts. Disconnect revokes at Google and deletes synced data |
 | Server → internet (web search) | Searches building a profile of you; SSRF through result links; injected instructions in web pages | Searches go only to your own SearXNG on this computer (the URL must be a loopback address), which queries public engines without an account or cookies. Result pages are read with the same connect-time SSRF guard as feeds (https, public addresses, redirects re-checked), capped at 1 MB, HTML stripped. Page text is untrusted data, fenced for the model, and a page that tries to instruct an AI is dropped. Off (None) until you grant the Knowledge agent Read |
-| Server → LLM | Data silently sent to a hosted model | The LLM URL must be localhost, and there is no hosted fallback |
+| Server → LLM | Data silently sent to a hosted model | The local LLM URL must be localhost. The only hosted model is Mistral's API, off by default and switched on by the owner only (Settings or the header switch, never by a request or an agent); see below for what each switch sends |
 | Server → Atlas / Voyage | Sending private data to the cloud | Off by default. Live mode needs config plus an in-app confirmation, per instance. The demo syncs only the fictional corpus. In the personal app, a note goes to Atlas only when you tick **Share to Atlas** on it (off by default); email, mail headers, events and About-me facts never do. Shared chunks carry a random per-instance `origin`: searches and clean-ups filter on it, so another instance on the same cluster (the demo, a test run) can't read or delete them. Unsharing, deleting the note or clearing your data deletes it from Atlas **first**, and nothing changes locally if Atlas can't be reached |
 | Server → Google app calendar | Calendar access used beyond the events you approve | Separate consent and token with `calendar.app.created`, which Google limits to calendars this app created. The allowlist permits only three calls: create its own calendar, insert an event into a calendar that isn't `primary`, and delete one event the app made there (by its derived id, for autopilot's Undo). There are no reads or edits, and never a delete in `primary` or of a calendar. Each event needs an approval of the exact content, uses a stable event id (retries can't duplicate it), and there's a cap of 20 a day. A setting turns this off in favour of Google's pre-filled page |
 | Server → Gmail drafts | A compose-scoped token used to send or read mail | Separate consent and token from read-only Gmail. The only calls are `POST /users/me/drafts`, after an approval of the exact text, and `DELETE /users/me/drafts/{id}` for one draft the app made (autopilot's Undo, by the id it recorded); the token can't be used for reads or sending. RFC 2822 headers reject line breaks (no header injection). Revocable on its own. Residual risk: anyone who steals the token *and* the key file could send mail, so revoke it if the machine is compromised |
@@ -63,13 +63,22 @@ check as a click, so it can never exceed an agent's level. A pause switch in the
 every automatic action is in the activity log and in "Done for you" with Undo. Settings change only from the Settings page,
 never from a request's words.
 
-## Optional cloud help for understanding requests (off by default)
+## Optional Mistral cloud models (off by default)
 
-When the owner turns it on (Settings), the typed Ctrl+K request and the fixed skill list are sent to Mistral's API
-(api.mistral.ai, EU) to choose a skill. Nothing else is sent: no email, note, calendar entry, draft or answer, and the self-check
-stays local. The API key is sealed with the app's AES-GCM key (like OAuth tokens) and never returned by any API. The feature is
-off in the demo instance, capped per day, and falls back to the local model on any error (a rate-limit, quota, payment or key
-error also pauses it until the next day). The destination URL is fixed in code.
+One Mistral API key (api.mistral.ai, EU; free Experiment plan, no payment method) serves two switches, both off by default,
+both changed only by the owner (Settings, or the header switch for the second), never by a request, an agent or autopilot:
+
+- **Understand requests in the cloud:** the typed request and the fixed skill list are sent to choose a skill. Nothing else.
+- **Do the work in the cloud:** drafts, answers, briefings and reviews are written by a Mistral model, so **the text each task
+  needs is sent to Mistral: email text, notes and calendar entries included**. The screen says so where it is switched on. The
+  same untrusted-data fencing applies, the model still has no tools, and nothing is sent or approved for the owner: the same
+  approvals and permissions apply. Any refused or failed call is answered by the local model instead.
+
+The key is sealed with the app's AES-GCM key (like OAuth tokens) and never returned by any API. Both switches are off in the demo
+instance and share one daily cap (200 by default), checked on every call. A rate-limit, quota, payment or key error pauses cloud use
+until the next day, and the local model answers meanwhile. The destination URL is fixed in code, and redirects are refused. On
+the free plan Mistral may use what is sent to improve its models unless the owner turns that off in Mistral's Admin Console
+(Privacy); the Settings card says so.
 
 ## Known limitations (deliberate, documented)
 

@@ -78,10 +78,24 @@ test("capture", async ({ page }) => {
   await go(page, "insights", "light");
   await page.screenshot({ path: out("insights-light") });
 
-  // The approval screen: the exact content you approve, and its fingerprint.
+  // The approval screen, with different kinds of drafts on top (the sweep's holding replies all read the same):
+  // a nudge to Tom, then a reply to Jordan written from your own words, opened for approval.
   await go(page, "actions", "light");
-  const card = page.locator("main section").filter({ hasText: "Review & approve" }).first();
+  await page.locator("main section").filter({ hasText: /Reply to jordan@example\.com/ }).first().getByRole("button", { name: "Dismiss" }).click();
+  await expect(page.getByText("Dismissed").first()).toBeVisible();
+  await go(page, "insights", "light");
+  await page.getByRole("listitem").filter({ hasText: "Photos from the trip?" }).getByRole("button", { name: "Draft a nudge" }).click();
+  await expect(page.getByText(/Follow-up drafted/)).toBeVisible();
+  await go(page, "today", "light");
+  await page.keyboard.press("Control+k");
+  await page.getByLabel("Ask your Chief of Staff").fill("reply to jordan that I vote for the first book and can bring the snacks");
+  await page.getByLabel("Ask your Chief of Staff").press("Enter");
+  await expect.poll(async () => (await state()).actions.some((a: { title: string; status: string }) => a.status === "proposed" && /Reply to jordan/.test(a.title)), { timeout: 600_000, intervals: [3000] }).toBe(true);
+  await page.keyboard.press("Escape");
+  await go(page, "actions", "light");
+  const card = page.locator("main section").filter({ hasText: /Reply to jordan@example\.com/ }).first();
   await card.getByRole("button", { name: "Review & approve" }).click();
+  await page.waitForTimeout(300);
   await page.screenshot({ path: out("approval-light") });
 
   await go(page, "today", "light");

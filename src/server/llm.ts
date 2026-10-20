@@ -3,6 +3,8 @@ import { config } from "./config";
 import { getSetting, run, setSetting, type Ctx } from "./db";
 import { withTimeout } from "./tools/budget";
 import { beginLlmCall, unloadModel } from "./llmRuntime";
+import { cloudWorker } from "./cloudRouter";
+import { requestSignal } from "./requestScope";
 
 /**
  * LLM provider interface. The default is a local Ollama model, and there is deliberately no hosted fallback: if the local model
@@ -137,7 +139,8 @@ async function checkedResponse(model: string, p: Promise<Response>): Promise<Res
 export function ollamaProvider(model = config().OLLAMA_CHAT_MODEL, ctx?: Ctx, task: LlmTask = "background"): LlmProvider {
   const track = (opts: LlmOptions) => {
     const call = ctx ? beginLlmCall(ctx, model, task) : null;
-    const signals = [opts.signal, call?.signal].filter((s): s is AbortSignal => !!s);
+    // The request's own cancel signal too ("Cancel" on a background request stops the model mid-answer).
+    const signals = [opts.signal, call?.signal, requestSignal()].filter((s): s is AbortSignal => !!s);
     const offloaded = (err: unknown) => (call?.signal.aborted ? new LlmOffloadedError() : err);
     return { opts: { ...opts, signal: signals.length ? AbortSignal.any(signals) : undefined }, end: () => call?.end(), offloaded };
   };
@@ -209,8 +212,34 @@ export function selectedModel(ctx: Ctx, task: LlmTask = "background"): string {
   return getSetting(ctx.db, `llm.model.${task}`) ?? getSetting(ctx.db, "llm.model") ?? config().OLLAMA_CHAT_MODEL;
 }
 
+/** The local model chosen for this task (Ollama on this computer). */
 export function localLlm(ctx: Ctx, task: LlmTask = "background"): LlmProvider {
   return ollamaProvider(selectedModel(ctx, task), ctx, task);
+}
+
+/**
+ * The model that does the work: the local one, or, when the owner turned on "do the work in the cloud" (Settings, or the
+ * header switch), Mistral's cloud model with the local one as the fallback for any call Mistral refuses or can't answer
+ * (cap reached, paused, network). Every drafting, answering and reviewing step asks for its model here.
+ */
+export function workLlm(ctx: Ctx, task: LlmTask = "background"): LlmProvider {
+  const local = localLlm(ctx, task);
+  const cloud = cloudWorker(ctx);
+  if (!cloud) return local;
+  return {
+    id: cloud.id,
+    label: `${cloud.label}; ${local.label} if it can't answer`,
+    model: cloud.model,
+    async generate(system, user, opts) {
+      try {
+        return await cloud.generate(system, user, opts);
+      } catch (err) {
+        // A cancelled request stops here: no second attempt on the local model.
+        if (opts?.signal?.aborted || requestSignal()?.aborted) throw err;
+        return local.generate(system, user, opts);
+      }
+    },
+  };
 }
 
 export interface InstalledModel {
@@ -266,6 +295,8 @@ export async function setLanguageModel(ctx: Ctx, lang: string, model: string | n
 
 /** The provider for drafting in `lang`: its own model if one is set, otherwise `fallback`. */
 export function draftLlmFor(ctx: Ctx, lang: string | null, fallback: LlmProvider): LlmProvider {
+  // The cloud model writes every language well: no local per-language model (and no model swap) when it does the work.
+  if (fallback.id === "mistral-api") return fallback;
   const model = lang ? languageModel(ctx, lang) : null;
   return model && model !== fallback.model ? ollamaProvider(model, ctx, "background") : fallback;
 }

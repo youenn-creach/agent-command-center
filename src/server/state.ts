@@ -11,6 +11,8 @@ import { listFacts } from "./memory";
 import { listRequests } from "./requests";
 import { systemResources } from "./resources";
 import { cloudRouterStatus } from "./cloudRouter";
+import { config } from "./config";
+import { localToday, zonedToUtc } from "./agents/eventParse";
 import { autopilotStatus, doneForYou } from "./autopilot";
 import { listInsights } from "./insights";
 import { impactSummary } from "./impact";
@@ -33,8 +35,8 @@ import { getLocation } from "./connectors/weather";
  */
 export async function dashboardState(ctx: Ctx) {
   const now = ctx.now();
-  const dayStart = new Date(now);
-  dayStart.setHours(0, 0, 0, 0);
+  // Midnight in the configured time zone, not the machine's.
+  const dayStart = zonedToUtc(localToday(now, config().timezone), 0, config().timezone);
   const dayEnd = new Date(dayStart.getTime() + 2 * 86_400_000);
 
   // Services (and the jobs that need them) that aren't part of this instance are left out entirely.

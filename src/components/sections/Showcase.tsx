@@ -17,7 +17,7 @@ const PROVIDERS: { id: RetrievalProviderId; name: string; where: string; tone: T
   { id: "atlas-voyage", name: "Atlas Vector Search + Voyage AI", where: "Cloud · free tiers, opt-in", tone: "mongo" },
 ];
 
-const SYSTEM_TONE: Record<TraceStep["system"], Tone> = { "Voyage AI": "voyage", "MongoDB Atlas": "mongo", Local: "local", Ollama: "local" };
+const SYSTEM_TONE: Record<TraceStep["system"], Tone> = { "Voyage AI": "voyage", "MongoDB Atlas": "mongo", Local: "local", Ollama: "local", "Mistral API": "warn" };
 
 export function ShowcaseView({ state, refresh }: SectionProps) {
   const toast = useToast();

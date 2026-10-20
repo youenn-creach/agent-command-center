@@ -5,7 +5,7 @@ import { all, getSetting, newId, one, run, setSetting, tx, type Ctx } from "../d
 import { config } from "../config";
 import { UserError } from "../errors";
 import { logActivity } from "../activity";
-import { fenceUntrusted, localLlm, UNTRUSTED_DATA_RULES, type LlmProvider } from "../llm";
+import { fenceUntrusted, workLlm, UNTRUSTED_DATA_RULES, type LlmProvider } from "../llm";
 import { bm25, chunkText, injectionFlags } from "./text";
 import { dot, fromBlob, nanoModelInstalled, nanoProvider, reserveVoyageRequests, toBlob, voyageApiProvider, voyageRerank, VoyageRateLimitError, type EmbeddingProvider } from "./embeddings";
 import { atlasHybridSearch, atlasVectorSearch, deleteSharedChunks, deleteStaleSharedChunks, ensureTextIndex, ensureVectorIndex, safeError, upsertChunks, type AtlasChunk, type AtlasScope } from "./atlas";
@@ -44,7 +44,7 @@ export interface Passage {
 }
 
 export interface TraceStep {
-  system: "Voyage AI" | "MongoDB Atlas" | "Local" | "Ollama";
+  system: "Voyage AI" | "MongoDB Atlas" | "Local" | "Ollama" | "Mistral API";
   location: "cloud" | "local";
   operation: string;
   detail: Record<string, string | number | boolean>;
@@ -317,7 +317,7 @@ export async function setAtlasShare(ctx: Ctx, id: string, share: boolean) {
   return { shared: false, chunks: 0 };
 }
 
-export async function retrieve(ctx: Ctx, rawInput: RetrieveInput, llm: LlmProvider = localLlm(ctx, "interactive"), actor = "user"): Promise<RetrievalResult> {
+export async function retrieve(ctx: Ctx, rawInput: RetrieveInput, llm: LlmProvider = workLlm(ctx, "interactive"), actor = "user"): Promise<RetrievalResult> {
   const input = RetrieveInputSchema.parse(rawInput);
   const trace: TraceStep[] = [];
   let passages: Passage[] = [];
@@ -590,7 +590,8 @@ export async function groundedAnswer(query: string, passages: Passage[], llm: Ll
   const { system, user, note } = answerPrompt(query, passages);
   try {
     const out = await llm.generate(system, user, { maxTokens: 220, timeoutMs: 900_000 });
-    trace.push({ system: "Ollama", location: "local", operation: "Grounded answer (no tools)", detail: { model: out.model, passages: passages.length }, ms: out.ms });
+    const cloud = out.model.startsWith("mistral-api:");
+    trace.push({ system: cloud ? "Mistral API" : "Ollama", location: cloud ? "cloud" : "local", operation: "Grounded answer (no tools)", detail: { model: out.model, passages: passages.length }, ms: out.ms });
     return { text: out.text, method: "llm", model: out.model, note };
   } catch (err) {
     return extractiveAnswer(passages, trace, err);
@@ -604,7 +605,7 @@ export type AnswerEvent = { type: "token"; text: string } | { type: "done"; resu
  * final answer on the retrieval run. Falls back to the extractive answer if the model fails
  * before producing anything; aborting (client disconnect) stops generation in Ollama too.
  */
-export async function* streamAnswer(ctx: Ctx, retrievalId: string, signal?: AbortSignal, llm: LlmProvider = localLlm(ctx, "interactive")): AsyncGenerator<AnswerEvent> {
+export async function* streamAnswer(ctx: Ctx, retrievalId: string, signal?: AbortSignal, llm: LlmProvider = workLlm(ctx, "interactive")): AsyncGenerator<AnswerEvent> {
   const row = one<{ result: string }>(ctx.db, "SELECT result FROM retrieval_runs WHERE id = ?", retrievalId);
   if (!row) throw new UserError("Retrieval run not found", 404);
   const result = JSON.parse(row.result) as RetrievalResult;
@@ -633,7 +634,7 @@ export async function* streamAnswer(ctx: Ctx, retrievalId: string, signal?: Abor
 }
 
 /** Second, slower step: generate a grounded answer for a stored retrieval run with the local LLM. */
-export async function answerRetrieval(ctx: Ctx, retrievalId: string, llm: LlmProvider = localLlm(ctx, "interactive")): Promise<RetrievalResult> {
+export async function answerRetrieval(ctx: Ctx, retrievalId: string, llm: LlmProvider = workLlm(ctx, "interactive")): Promise<RetrievalResult> {
   const row = one<{ result: string }>(ctx.db, "SELECT result FROM retrieval_runs WHERE id = ?", retrievalId);
   if (!row) throw new UserError("Retrieval run not found", 404);
   const result = JSON.parse(row.result) as RetrievalResult;

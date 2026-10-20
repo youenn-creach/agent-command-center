@@ -18,6 +18,8 @@ export function CommandBar({ go, refresh }: { go: Go; refresh: () => Promise<voi
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [elapsed, setElapsed] = useState(0);
+  // The request being understood right now, so "Cancel" can abort it (the server then stops its model call).
+  const inflight = useRef<AbortController | null>(null);
   const [result, setResult] = useState<CommandResult | { error: string } | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const [focused, setFocused] = useState(false);
@@ -61,12 +63,16 @@ export function CommandBar({ go, refresh }: { go: Go; refresh: () => Promise<voi
     setAskedText(q);
     setElapsed(0);
     setBusy(true);
+    const abort = new AbortController();
+    inflight.current = abort;
     try {
-      setResult(await post<CommandResult>("/api/command", chosen ? { text: q, skill: chosen.skill, wrong: chosen.wrong } : { text: q }));
+      setResult(await post<CommandResult>("/api/command", chosen ? { text: q, skill: chosen.skill, wrong: chosen.wrong } : { text: q }, abort.signal));
       await refresh();
     } catch (e) {
-      setResult({ error: (e as Error).message });
+      // Cancelled while being understood: the server stopped its model call and ran nothing.
+      setResult(abort.signal.aborted ? { error: "Cancelled. Nothing was done for this request." } : { error: (e as Error).message });
     } finally {
+      inflight.current = null;
       setBusy(false);
     }
   }
@@ -137,6 +143,11 @@ export function CommandBar({ go, refresh }: { go: Go; refresh: () => Promise<voi
             <span className="shimmer-text">Understanding your request with the local model…</span> {elapsed > 0 && <span className="tabular-nums text-muted">{elapsed} s</span>}
           </p>
           <p className="mt-1 text-xs text-muted">This usually takes 10–40 seconds on this computer. Nothing is sent or changed without your approval.</p>
+          <div className="mt-2">
+            <Button variant="ghost" onClick={() => inflight.current?.abort()}>
+              Cancel
+            </Button>
+          </div>
         </div>
       )}
       {result && (
@@ -146,6 +157,7 @@ export function CommandBar({ go, refresh }: { go: Go; refresh: () => Promise<voi
           ) : (
             <>
               <p className={cx(result.intent === "refused" && "text-warn")}>{result.reply}</p>
+              {result.requestId && <CancelRequest id={result.requestId} refresh={refresh} />}
               {result.items && result.items.length > 0 && (
                 <ul className="mt-2 max-h-64 space-y-1.5 overflow-auto">
                   {result.items.map((it, i) => (
@@ -327,6 +339,33 @@ function EventCard({ event, approval, refresh }: { event: PreparedEvent; approva
           <p className="mt-2 text-[11px] text-muted">Opens Google Calendar with the event filled in; you can still change it there before saving.</p>
         </>
       )}
+    </div>
+  );
+}
+
+/** Stops a request that runs in the background (its model call included) and keeps everything else running. */
+export function CancelRequest({ id, refresh, compact }: { id: string; refresh: () => Promise<void>; compact?: boolean }) {
+  const [state, setState] = useState<"idle" | "busy" | "done" | string>("idle");
+  if (state === "done") return <p className={cx("text-xs text-muted", !compact && "mt-2")}>Cancelled. Nothing more will be done for this request.</p>;
+  return (
+    <div className={cx("flex items-center gap-2", !compact && "mt-2")}>
+      <Button
+        variant="ghost"
+        busy={state === "busy"}
+        onClick={async () => {
+          setState("busy");
+          try {
+            await post("/api/command", { op: "cancel", id });
+            setState("done");
+            await refresh();
+          } catch (e) {
+            setState((e as Error).message);
+          }
+        }}
+      >
+        Cancel this request
+      </Button>
+      {state !== "idle" && state !== "busy" && <span className="text-xs text-muted">{state}</span>}
     </div>
   );
 }

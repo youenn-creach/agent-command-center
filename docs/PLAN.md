@@ -10,7 +10,8 @@
 | 3 — Polish & assets | Reminders, weekly review, schedule creation, command bar, Markdown import, retention, hybrid search (local RRF + Atlas `$rankFusion`), migrations, backups, E2E + accessibility, CSP, theme toggle, CI, README screenshots | **Done** |
 | 4 — Personal and demo | Personal app and demo side by side (`ACC_MODE`), simple view, agents panel, colour per permission level, role profiles, offload of idle local models | **Done** |
 | 5 — Assistant features | Inbox insights (unanswered threads + nudges, trips & bookings, subscription audit), About me facts, request board, Gmail drafts and an app-owned Google calendar (each behind approval), free-slot proposals, desktop and ntfy notifications, replies in English, French, Spanish and Catalan with a model per language, prompt-injection detection in all four, **Impact card**, recall chart, opt-in **Share to Atlas** for your own notes | **Done** |
-| 6 — Next | ICS calendars, OS keyring for the token key, a pinned voyage-4-nano checksum, optional Atlas Local (Docker) backend | Ideas |
+| 6 — Understanding and autonomy | Prompt bar redesign, "Not right?" corrections that teach the router, calendar answers computed in code, two-part requests, web answers from matching passages, autopilot (off by default) with Done for you and Undo, cancel a request, optional Mistral cloud models (free tier), memory guard, accuracy measured on fresh held-out request sets (docs/ACCURACY_PLAN.md) | **Done** |
+| 7 — Next | API token for local calls, OS keyring for the token key, ICS calendars, a pinned voyage-4-nano checksum, optional Atlas Local (Docker) backend | Ideas |
 
 ## Architecture
 

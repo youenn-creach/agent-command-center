@@ -39,7 +39,7 @@ const TIME = "(\\d{1,2})(?:[:h.](\\d{2})|h)?\\s*(am|pm)?"; // 3pm, 15:00, 15h30,
 export type Ymd = { y: number; m: number; d: number };
 const pad = (n: number) => String(n).padStart(2, "0");
 const fmtYmd = ({ y, m, d }: Ymd) => `${y}-${pad(m)}-${pad(d)}`;
-const addDays = ({ y, m, d }: Ymd, n: number): Ymd => {
+export const addDays = ({ y, m, d }: Ymd, n: number): Ymd => {
   const t = new Date(Date.UTC(y, m - 1, d + n));
   return { y: t.getUTCFullYear(), m: t.getUTCMonth() + 1, d: t.getUTCDate() };
 };

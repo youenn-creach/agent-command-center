@@ -115,14 +115,21 @@ than 60 days away or longer than 12 hours, and drafts to someone whose address i
 actions an hour and 10 a day (change these on the Autopilot card, up to 10 an hour and 20 a day). Everything it does is listed under **Done for you** on Today, with **Undo** (it also appears
 under the answer in the prompt bar). The **Autopilot on · Pause** button in the header puts everything back to “ask first” at once.
 
-## Optional: cloud help for understanding requests
+## Optional: Mistral's cloud models
 
-Off by default. In **Settings → Understanding requests**, you can let Mistral's API choose which skill answers a Ctrl+K request.
-Only the words you type and the list of skills are sent; your mail, notes, calendar and drafts stay on this computer, and the
-answer is still built locally. It is meant to be free: use a key from Mistral's free Experiment plan with no payment method on
-the account. The app stops after a daily number of requests (200 by default) and, if Mistral answers with a rate-limit, quota or
-payment message, it uses the local model again until the next day. Requests it understood say “mistral-api” on the request board.
-Never used in the demo app.
+Off by default: everything runs on your computer. In **Settings → Mistral cloud models**, save a key from Mistral's free
+Experiment plan (console.mistral.ai, with no payment method on the account, so nothing can be billed). Two separate switches:
+
+- **Understand requests in the cloud:** Mistral chooses which skill answers what you type. Only your words and the list of skills
+  are sent; the answer is still built on your computer.
+- **Do the work in the cloud** (more thinking power): drafts, answers, briefings and the inbox review are written by a Mistral cloud
+  model (Medium by default; Large or Small in Settings). **The text each task needs is sent to Mistral, emails included.** Once a
+  key is saved, the header has a one-click switch: **Local model · Use cloud** / **Cloud model · Back to local**.
+
+Both share a daily limit (200 requests by default). If Mistral refuses a call, or answers with a rate-limit, quota or payment
+message, your computer's model takes over (until the next day for those messages). On the free plan Mistral may use what you
+send to improve its models: turn that off in Mistral's Admin Console, under **Privacy**. Approvals don't change: nothing is
+sent or approved for you. Never used in the demo app.
 
 ## Calendar events: two ways
 

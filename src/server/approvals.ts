@@ -1,3 +1,4 @@
+import { assertNotCancelled } from "./requestScope";
 import { createHash } from "node:crypto";
 import { notifyLater } from "./notify";
 import { z } from "zod";
@@ -177,6 +178,8 @@ export interface ProposeInput {
 
 /** Agents may only *propose*. Requires effective "prepare"; never touches the outside world. */
 export function proposeAction(ctx: Ctx, input: ProposeInput): ActionRow {
+  // A request the owner cancelled proposes nothing more (its work may still be finishing a step).
+  assertNotCancelled();
   authorize(ctx, input.agentId, input.serviceId, "prepare", `Proposing ${input.kind}`);
   const payload = parsePayload(input.kind, input.payload);
   if (!kindFitsService(input.kind, input.serviceId, payload)) throw new ApprovalError("INVALID_PAYLOAD", `A ${input.kind} cannot target ${input.serviceId}`);

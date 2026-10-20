@@ -5,11 +5,12 @@ import type { DashboardState } from "@/server/state";
 import type { Go } from "./Dashboard";
 import { relative } from "./api";
 import { Badge, Button, Card, Empty, Spinner, type Tone } from "./ui";
+import { CancelRequest } from "./CommandBar";
 
 const TONE: Record<string, Tone> = { waiting: "accent", working: "accent", done: "ok", failed: "danger", cancelled: "neutral", answered: "neutral", declined: "warn", unsupported: "warn" };
 
 /** Your Ctrl+K requests, where each one is, and the answer it delivered (open one to read it). */
-export function RequestsCard({ requests, go }: { requests: DashboardState["requests"]; go: Go }) {
+export function RequestsCard({ requests, go, refresh }: { requests: DashboardState["requests"]; go: Go; refresh: () => Promise<void> }) {
   const [open, setOpen] = useState<string | null>(null);
   return (
     <Card title="Your requests" subtitle="What you asked with Ctrl+K, where each request is now, and its answer.">
@@ -38,7 +39,10 @@ export function RequestsCard({ requests, go }: { requests: DashboardState["reque
                 {expanded && (
                   <div className="border-t border-line px-2 py-2 text-sm">
                     {r.state === "working" ? (
-                      <p className="text-muted">Still working on it: {r.status}</p>
+                      <>
+                        <p className="text-muted">Still working on it: {r.status}</p>
+                        <CancelRequest id={r.id} refresh={refresh} />
+                      </>
                     ) : (
                       <>
                         <p className="whitespace-pre-line">{r.answer?.reply ?? r.reply}</p>

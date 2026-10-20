@@ -67,7 +67,8 @@ export function setRequestProgress(ctx: Ctx, id: string, progress: string) {
 export function finishRequest(ctx: Ctx, id: string, out: { ok: boolean; reply: string; items?: { title: string; detail?: string; href?: string }[]; actionId?: string }) {
   run(
     ctx.db,
-    "UPDATE requests SET status = ?, progress = NULL, reply = ?, result = ?, action_id = COALESCE(?, action_id) WHERE id = ?",
+    // Only a request still working: one the owner cancelled stays cancelled, whatever its work finishes with.
+    "UPDATE requests SET status = ?, progress = NULL, reply = ?, result = ?, action_id = COALESCE(?, action_id) WHERE id = ? AND status = 'working'",
     out.ok ? "done" : "failed",
     out.reply.slice(0, 500),
     JSON.stringify({ reply: out.reply, items: out.items ?? [] }),
@@ -132,7 +133,7 @@ export function listRequests(ctx: Ctx, limit = 15): RequestView[] {
     limit,
   ).map((r) => {
     const own: [RequestState, string] | null =
-      r.status === "working" ? ["working", r.progress ?? "Working…"] : r.status === "failed" ? ["failed", "Failed"] : r.status === "unsupported" ? ["unsupported", "Not possible yet"] : r.status === "done" && !r.action_status ? ["done", "Ready"] : null;
+      r.status === "working" ? ["working", r.progress ?? "Working…"] : r.status === "cancelled" ? ["cancelled", "Cancelled"] : r.status === "failed" ? ["failed", "Failed"] : r.status === "unsupported" ? ["unsupported", "Not possible yet"] : r.status === "done" && !r.action_status ? ["done", "Ready"] : null;
     const [state, status] = own || (r.action_status && ACTION_STATE[r.action_status]) || (r.run_status && RUN_STATE[r.run_status]) || INTENT_STATE[r.intent] || ["answered", "Answered"];
     let answer: RequestView["answer"] = null;
     try {

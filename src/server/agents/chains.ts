@@ -4,7 +4,7 @@ import { config } from "../config";
 import { demoRowsFilter } from "../mode";
 import { callTool } from "../tools/registry";
 import { RunBudget } from "../tools/budget";
-import { fenceUntrusted, localLlm, UNTRUSTED_DATA_RULES, type LlmProvider } from "../llm";
+import { fenceUntrusted, workLlm, UNTRUSTED_DATA_RULES, type LlmProvider } from "../llm";
 import { addReminder } from "../reminders";
 import { InsightError, proposeNudge } from "../insights";
 import { correctWeekdayDate, weekdayAfter, localToday, parseEventRequest, zonedToUtc, type Ymd } from "./eventParse";
@@ -87,7 +87,7 @@ const REMIND_SCHEMA = {
 const FoundTask = z.object({ found: z.boolean(), source: z.number().int().catch(1), task: z.string().default(""), due: z.string().default("") });
 
 /** "Remind me to pay the electricity bill before it's due": the bill from the mail, a reminder ahead of its deadline. */
-export async function reminderFromEmail(ctx: Ctx, text: string, query: string, progress: (s: string) => void, llm: LlmProvider = localLlm(ctx, "background")): Promise<SkillAnswer> {
+export async function reminderFromEmail(ctx: Ctx, text: string, query: string, progress: (s: string) => void, llm: LlmProvider = workLlm(ctx, "background")): Promise<SkillAnswer> {
   if (!isConnected(ctx, "gmail")) return { reply: "Gmail isn't connected, so I can't look in your mail. Connect it in Connections & Permissions.", section: "permissions" };
   progress("Searching your mail…");
   let read;

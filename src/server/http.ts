@@ -13,6 +13,7 @@ import { VoyageRateLimitError } from "./retrieval/embeddings";
 import { LlmUnavailableError } from "./llm";
 import type { Ctx } from "./db";
 import { UserError } from "./errors";
+import { RequestCancelledError } from "./requestScope";
 
 /**
  * Request guard for every API route.
@@ -114,6 +115,7 @@ export function errorResponse(err: unknown): Response {
   if (err instanceof PermissionChangeError || err instanceof SchedulerError || err instanceof CsvError || err instanceof ToolInputError) {
     return Response.json({ error: err.message }, { status: 400 });
   }
+  if (err instanceof RequestCancelledError) return Response.json({ error: err.message, code: "CANCELLED" }, { status: 499 });
   if (err instanceof LlmUnavailableError) return Response.json({ error: err.message, code: err.code }, { status: 503 });
   if (err instanceof VoyageRateLimitError) return Response.json({ error: err.message, code: err.code, retryInSeconds: err.retryInSeconds }, { status: 429 });
   if (err instanceof ZodError) {

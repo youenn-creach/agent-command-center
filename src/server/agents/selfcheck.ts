@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { getSetting, type Ctx } from "../db";
-import { localLlm, fenceUntrusted, type LlmProvider } from "../llm";
+import { workLlm, fenceUntrusted, type LlmProvider } from "../llm";
 import { skillList, type Skill, type SkillAnswer } from "./assistant";
 
 /**
@@ -35,7 +35,7 @@ export function selfCheckOn(ctx: Ctx): boolean {
 }
 
 /** The model's verdict on one answer; {ok: true} whenever it can't be had. */
-export async function judgeAnswer(ctx: Ctx, request: string, used: string, answer: SkillAnswer, llm: LlmProvider = localLlm(ctx, "background")): Promise<{ ok: boolean; missing: string; skill: Skill | null }> {
+export async function judgeAnswer(ctx: Ctx, request: string, used: string, answer: SkillAnswer, llm: LlmProvider = workLlm(ctx, "background")): Promise<{ ok: boolean; missing: string; skill: Skill | null }> {
   const shown = [answer.reply, ...(answer.items ?? []).slice(0, 8).map((i) => `- ${i.title}${i.detail ? ` (${i.detail.slice(0, 120)})` : ""}`)].join("\n").slice(0, 1500);
   try {
     const out = await llm.generate(`${CHECK_SYSTEM}\n${skillList()}\nAnswer with JSON only.`, `Request: ${request}\nSkill used: ${used}\n${fenceUntrusted("answer shown to the user", shown)}`, {

@@ -2,14 +2,14 @@
 
 # Agent Command Center
 
-**A private AI chief of staff that runs on your laptop. It reads your Gmail and Calendar, finds what you're forgetting, drafts replies in your languages, and never sends anything without your click.**
+**A private AI chief of staff that runs on your laptop. It reads your Gmail and Calendar, finds what you're forgetting, and prepares the work: replies in your languages, events, reminders. It can't send an email: in Gmail it only creates drafts, and every action waits for your approval of its exact content.**
 
 Semantic search with **MongoDB Atlas Vector Search** and **Voyage AI**, side by side with fully local alternatives. Every run says what actually handled it.
 
 ![Node 24](https://img.shields.io/badge/node-24_LTS-339933?logo=node.js&logoColor=white)
 ![Next.js 16](https://img.shields.io/badge/Next.js-16-000000?logo=next.js)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-375_unit_·_15_e2e-2ea44f)
+![Tests](https://img.shields.io/badge/tests-768_unit_·_17_e2e-2ea44f)
 ![Cost](https://img.shields.io/badge/runs_at-%240-2ea44f)
 ![Local first](https://img.shields.io/badge/works-offline-6a3fd1)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
@@ -40,8 +40,10 @@ Personal context is scattered (inbox, calendar, notes, feeds) and phrased incons
 | **Connections & Permissions** | None / Read / Prepare / Write-with-approval per service *and* per agent, a colour per level. Effective access is the stricter of the two |
 | **Under the hood** | Six retrieval modes side by side, each with a step-by-step trace, "why this matched" highlighting, streamed grounded answers, and a measured evaluation with a recall chart |
 | **Knowledge & Data** | Notes, CSV and Markdown import with preview, explicit indexing, "About me" facts used in drafts, per-note **Share to Atlas** (off by default), export, clear-my-data, retention |
-| **Ask your Chief of Staff** | <kbd>Ctrl</kbd>+<kbd>K</kbd>, in your own words: “anything in my email this week that needs me?”, “did Marc answer?”, “what's my booking reference for the Lisbon hotel?”, “prep me for my meeting with Laura”, “am I free friday afternoon?”, “remind me to call mom tomorrow at 6pm”, “reply to Ana that Thursday works”, “weather in Barcelona tomorrow?”. The local model picks one of a fixed set of skills; code does the work under the usual permissions. Long tasks report progress and deliver their answer on the request board. It refuses to send, approve, delete, pay or change access, and says plainly what it can't do yet |
-| **Languages** | Replies are drafted in the email's language, each by the local model that writes it best: Ministral 3B for English and Spanish, Gemma 3 4B for French, Salamandra 7B for Catalan. Emails that try to instruct the AI are caught in all four languages and never reach the model |
+| **Ask your Chief of Staff** | <kbd>Ctrl</kbd>+<kbd>K</kbd>, in your own words: “anything in my email this week that needs me?”, “did Marc answer?”, “add my flights to my calendar”, “what's the weather on my trip?”, “tell Laura yes for dinner and add it to my calendar”, “how much free time do I have between lunch and the committee?”, “remind me at 3 to call the bank”. The local model picks one of a fixed set of skills; code does the work under the usual permissions. Long tasks report progress on the request board and can be **cancelled** at any point (the model stops mid-answer). Under each answer, **Not right?** lets you pick what you meant, and the app learns from it. It refuses to send, approve, delete, pay or change access, and says plainly what it can't do yet |
+| **Autopilot** (off by default) | Per kind, events and Gmail drafts *you* typed can be done without a click: never anything taken from an email or a web page, never sending, within limits you set (3 an hour and 10 a day by default), each listed under **Done for you** with **Undo**, and a pause switch in the header |
+| **Optional Mistral cloud** | Off by default, free tier only: one switch lets Mistral understand your requests (only your wording is sent); another, in the header, lets a bigger Mistral model do the work when you need more thinking power (then the text each task needs is sent to Mistral, and the screen says so). Your computer's model takes over whenever Mistral says no |
+| **Languages** | Replies are drafted in the email's language (English, French, Spanish, Catalan) by the local model you choose (Ministral 3 8B recommended), optionally with a model per language (Gemma 3 4B for French, Salamandra 7B for Catalan). Emails that try to instruct the AI are caught in all four languages and never reach the model |
 | **Notifications** | Optional desktop and phone push (ntfy) when something needs you, with generic text |
 | **Integrations** | Gmail and Google Calendar (read-only), Gmail drafts (approved, never sent), a separate app-owned Google calendar for events you approve, public RSS feeds, weather (Open-Meteo), automation webhooks (Zapier, Make, n8n, IFTTT: every call approved), local Ollama, an MCP server (stdio) |
 | **Personal app + demo** | One codebase, two instances: your accounts on :3000, fictional data only on :3001 |
@@ -67,7 +69,8 @@ Personal context is scattered (inbox, calendar, notes, feeds) and phrased incons
 
 - **One rule engine on the server.** The UI, the scheduler worker and the MCP server all go through the same typed tool registry and policy engine. No agent tool can send, approve, change permissions, fetch arbitrary URLs, or touch the shell or filesystem.
 - **Deterministic workflows, not free-form loops.** A workflow is a fixed sequence of steps under a tool-call and time budget. The LLM only turns already-authorized data into text and never receives tools.
-- **Local first.** SQLite (built into Node), a BM25 baseline, voyage-4-nano embeddings on CPU, and a local LLM through Ollama. The cloud services are optional and opt-in.
+- **Local first.** SQLite (built into Node), a BM25 baseline, voyage-4-nano embeddings on CPU, and a local LLM through Ollama. The cloud services (Atlas, Voyage AI, Mistral) are optional and opt-in.
+- **Measured, not guessed.** Request understanding is graded automatically on sets of requests the code was never tuned on, each written before the code it measures; see [docs/ACCURACY_PLAN.md](docs/ACCURACY_PLAN.md).
 
 ## MongoDB Atlas + Voyage AI
 
@@ -99,7 +102,7 @@ The full threat model is in **[docs/SECURITY.md](docs/SECURITY.md)**. The highli
 - **Server-side permissions on every tool call, approval, execution and scheduled run.** Tests call the core directly to prove that denied operations cannot run.
 - **Approvals are bound to content.** Each one is tied to the SHA-256 of kind, service, destination and payload. An edit clears it. Execution re-checks the hash and the live permission, then uses compare-and-set, so it can't run twice.
 - **Untrusted content stays data.** Emails, notes, feeds and CSV/Markdown are fenced and flagged. The demo corpus contains a deliberately poisoned newsletter, and a fully "convinced" model still changes nothing.
-- **Read-only Google connectors.** PKCE, exact-scope checks, tokens encrypted with AES-256-GCM (key outside the database), revoke on disconnect. Email text is read on demand for a reply draft, processed by the local model only, and never stored.
+- **Read-only Google connectors.** PKCE, exact-scope checks, tokens encrypted with AES-256-GCM (key outside the database), revoke on disconnect. Email text is read on demand for a reply draft, processed by the local model (or by Mistral's cloud, only if you switch that on), and never stored.
 - **SSRF-safe feeds.** Every resolved IP address is checked at connect time, and redirects are re-validated.
 - **Localhost only**, with Host allowlist, CSRF protection, a CSP, size and rate limits, and secrets redacted from logs.
 
@@ -117,7 +120,8 @@ Everything works at $0 with no credentials. After editing `.env.local`, restart 
 
 | Optional | Command / setup |
 |---|---|
-| Local LLM | `ollama pull gemma3:1b` (fast) or any small model, then pick it in **Settings** |
+| Local LLM | `ollama pull ministral-3:8b` (recommended, about 6 GB of memory) or `ministral-3:3b` on smaller machines, then pick it in **Settings** |
+| Memory guard (laptops) | `npm run guard:install`: unloads the local model before memory runs out, so the computer never freezes |
 | Local semantic search | `npm run setup:local-embeddings` (one-time ~420 MB download of voyage-4-nano) |
 | Atlas + Voyage | Copy `.env.example` → `.env.local`, set `ATLAS_*` / `VOYAGE_*`, run `npm run atlas:setup` (again after updates that add a search filter), then confirm live mode in **Under the hood** |
 | Gmail / Google Calendar | [docs/GOOGLE_SETUP.md](docs/GOOGLE_SETUP.md) (about 10 minutes, read-only; optional Gmail drafts) |
@@ -154,6 +158,7 @@ Tools: `get_today`, `search_selected_knowledge`, `list_scheduled_jobs` and `prep
 |---|---|
 | `dev` · `build` · `start` | Web app (localhost only) |
 | `worker` · `worker:install` · `worker:uninstall` | Scheduler, in a terminal or as a systemd user service |
+| `guard:install` · `guard:uninstall` | Memory guard as a systemd user service |
 | `app:install` · `app:deploy` · `app:uninstall` | Dashboard as an always-on systemd user service; `app:deploy` rebuilds and restarts after updates |
 | `demo:install` · `demo:uninstall` | A second, demo-only instance on :3001 with its own data (`data/demo`) |
 | `test` · `build:e2e` + `test:e2e` · `typecheck` · `lint` · `check` | Quality gates (Vitest; Playwright + axe). `build:e2e` builds into `.next-e2e`, so tests never touch the build the live app serves |
@@ -188,13 +193,13 @@ docs/               security model, Google setup, plan, architecture
 
 Measured on an Intel i3-6006U (2 cores, 4 threads) with 12 GB RAM:
 
-- **Local models:** `gemma3:1b` writes a live news digest in about 30 s, and `ministral-3:3b` in 2–4 minutes; a reply draft takes about 40–80 s. Answers stream as they're written, only one model is kept in memory, and it can be unloaded when idle.
+- **Local models:** with `ministral-3:8b`, a request takes about 1–2 minutes end to end, and a web answer about 5 minutes; `ministral-3:3b` is roughly twice as fast. Only one model is kept in memory, it can be unloaded when idle, and the memory guard unloads it before the computer runs out of memory.
 - **Search:** about 1–2 s per query with voyage-4-nano locally, about 1.1 s with Atlas + Voyage (Atlas's own step about 50 ms), and about 10 ms with BM25.
 - **Voyage free tier without a payment method:** 3 requests per minute. The app paces itself to it.
 
 ## Status
 
-A working personal tool and a technical showcase. **Not production software.** There is no user login (single local user), and the local database is not encrypted. The only writes to real services are Gmail drafts and events in an app-owned calendar, each after you approve the exact content. See [docs/PLAN.md](docs/PLAN.md) for what's simulated, what's live, and what comes next.
+A working personal tool and a technical showcase. **Not production software.** There is no user login (single local user), and the local database is not encrypted. The only writes to real services are Gmail drafts and events in an app-owned calendar, each after you approve the exact content, or, if you turn on autopilot for them, within your limits and with Undo. See [docs/PLAN.md](docs/PLAN.md) for what's simulated, what's live, and what comes next.
 
 ## License
 

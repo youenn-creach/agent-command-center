@@ -2,7 +2,7 @@ import { all, newId, one, run, type Ctx } from "../db";
 import { notifyLater } from "../notify";
 import { demoRowsFilter, serviceHidden } from "../mode";
 import { aboutMePrompt } from "../memory";
-import { draftLlmFor, fenceUntrusted, localLlm, UNTRUSTED_DATA_RULES, type LlmProvider } from "../llm";
+import { draftLlmFor, fenceUntrusted, workLlm, UNTRUSTED_DATA_RULES, type LlmProvider } from "../llm";
 import { detectLanguage, holdingReplyIn, REPLY_IN, type Lang } from "../lang";
 import { callTool, type EventRow, type MessageRow, type NewsRow } from "../tools/registry";
 import { RunBudget } from "../tools/budget";
@@ -118,7 +118,7 @@ export async function writeReply(llm: LlmProvider, sender: string, subject: stri
   return { summary: null, reply: holdingReplyIn(lang, name), writer: "template" };
 }
 
-async function proposeGmailDrafts(ctx: Ctx, steps: StepRecord[], budget: RunBudget, limit: number, llm: LlmProvider = localLlm(ctx, "background")) {
+async function proposeGmailDrafts(ctx: Ctx, steps: StepRecord[], budget: RunBudget, limit: number, llm: LlmProvider = workLlm(ctx, "background")) {
   if (!isConnected(ctx, "gmail") || !isConnected(ctx, "gmail-drafts")) return 0;
   const waiting = await step(ctx, steps, AGENTS.followup, "gmail.list_messages", () => callTool(ctx, AGENTS.followup, "gmail.list_messages", { limit: 10, needsReplyOnly: true }, budget), (o) => `${o.length} Gmail message(s) waiting`);
   let proposed = 0;
@@ -205,7 +205,7 @@ async function step<T>(ctx: Ctx, steps: StepRecord[], agent: string, tool: strin
   }
 }
 
-export async function dailyBriefing(ctx: Ctx, job: JobRow | null, llm: LlmProvider = localLlm(ctx, "background")) {
+export async function dailyBriefing(ctx: Ctx, job: JobRow | null, llm: LlmProvider = workLlm(ctx, "background")) {
   const budget = new RunBudget(28, 600_000); // includes the two Gmail insight scans
   const steps: StepRecord[] = [];
   setAgentStatus(ctx, AGENTS.chief, "running", null, "workflow.daily_briefing");
@@ -348,7 +348,7 @@ export function briefingHasRealGoogleData(ctx: Ctx, provenance: { steps: { tool:
   return Boolean(one(ctx.db, "SELECT 1 FROM waiting_on WHERE is_demo = 0 LIMIT 1"));
 }
 
-export async function followupSweep(ctx: Ctx, llm: LlmProvider = localLlm(ctx, "background")) {
+export async function followupSweep(ctx: Ctx, llm: LlmProvider = workLlm(ctx, "background")) {
   const budget = new RunBudget(20, 600_000);
   const steps: StepRecord[] = [];
   // Demo inbox replies only where the instance has the demo inbox (not in the personal app);

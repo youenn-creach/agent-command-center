@@ -643,20 +643,33 @@ function CloudRouterCard({ state, refresh }: SectionProps) {
       setBusy(false);
     }
   };
+  const notNow = c.blocked && (c.enabled || c.work.enabled) ? `Not used right now: ${c.blocked}. The local model answers. ` : "";
   return (
-    <Card title="Understanding requests (optional cloud help)" subtitle="Off by default. When on, Mistral’s API chooses which skill answers your request. Only the words you type in Ctrl+K and the list of skills are sent; your mail, notes, calendar and drafts never leave this computer.">
-      <label className="flex items-start gap-2 text-sm">
-        <input type="checkbox" className="mt-1" checked={c.enabled} disabled={busy || (!c.hasKey && !c.enabled)} onChange={(e) => save({ enabled: e.target.checked }, e.target.checked ? "Cloud help for understanding is on" : "Cloud help for understanding is off")} />
-        <span>
-          <span className="font-medium">Use the Mistral API to understand requests</span>
-          <span className="block text-xs text-muted">
-            {c.blocked && c.enabled ? `Not used right now: ${c.blocked}. The local model answers. ` : ""}
-            {c.hasKey ? `Today: ${c.usedToday} of ${c.cap} requests.` : "Save a key first."}
+    <Card title="Mistral cloud models (optional, free)" subtitle="Off by default: everything runs on this computer. One key, two separate switches, and the same free daily limit for both. Also in the header, once a key is saved.">
+      <div className="space-y-3">
+        <label className="flex items-start gap-2 text-sm">
+          <input type="checkbox" className="mt-1" checked={c.enabled} disabled={busy || (!c.hasKey && !c.enabled)} onChange={(e) => save({ enabled: e.target.checked }, e.target.checked ? "Cloud help for understanding requests is on" : "Cloud help for understanding requests is off")} />
+          <span>
+            <span className="font-medium">Understand requests in the cloud</span>
+            <span className="block text-xs text-muted">Mistral chooses which skill answers what you type. Only your words and the list of skills are sent; mail, notes, calendar and drafts stay here.</span>
           </span>
-        </span>
-      </label>
+        </label>
+        <label className="flex items-start gap-2 text-sm">
+          <input type="checkbox" className="mt-1" checked={c.work.enabled} disabled={busy || (!c.hasKey && !c.work.enabled)} onChange={(e) => save({ work: e.target.checked }, e.target.checked ? "Mistral’s cloud now does the work" : "Back to the local model")} />
+          <span>
+            <span className="font-medium">Do the work in the cloud (more thinking power)</span>
+            <span className="block text-xs text-muted">
+              Drafts, answers, briefings and the inbox review are written by a Mistral cloud model, which also understands your requests. <strong className="text-warn">The text each task needs is sent to Mistral: emails, notes and calendar entries included.</strong> If Mistral refuses a call or the day&apos;s limit is reached, the local model takes over. Nothing is sent or approved for you: the same approvals apply.
+            </span>
+          </span>
+        </label>
+        <p className="text-xs text-muted">
+          {notNow}
+          {c.hasKey ? `Today: ${c.usedToday} of ${c.cap} cloud requests.` : "Save a key first."}
+        </p>
+      </div>
       <p className="mt-2 rounded-md bg-panel-2 px-2.5 py-2 text-xs text-muted">
-        Free only: create a key on Mistral&apos;s free Experiment plan (console.mistral.ai) and add no payment method, so nothing can be billed. The app stops at {c.cap} requests a day and, on any rate-limit, quota or payment message from Mistral, goes back to the local model until the next day.
+        Free only: create a key on Mistral&apos;s free Experiment plan (console.mistral.ai) and add no payment method, so nothing can be billed. The app stops at {c.cap} cloud requests a day and, on any rate-limit, quota or payment message from Mistral, goes back to the local model until the next day. On the free plan Mistral may use what you send to improve its models: turn that off in Mistral&apos;s Admin Console, under Privacy.
       </p>
       <div className="mt-3 flex flex-wrap items-end gap-2">
         <Field label={c.hasKey ? "Replace the API key" : "API key"}>
@@ -666,12 +679,21 @@ function CloudRouterCard({ state, refresh }: SectionProps) {
           Save key
         </Button>
         {c.hasKey && (
-          <Button variant="ghost" busy={busy} onClick={() => save({ key: "", enabled: false }, "API key removed")}>
+          <Button variant="ghost" busy={busy} onClick={() => save({ key: "" }, "API key removed; both switches are off")}>
             Remove key
           </Button>
         )}
-        <Field label="Model">
-          <select className={inputCls} value={c.model} disabled={busy} onChange={(e) => save({ model: e.target.value }, `Cloud model: ${e.target.value}`)}>
+      </div>
+      <div className="mt-3 flex flex-wrap items-end gap-2">
+        <Field label="Model for the work">
+          <select className={inputCls} value={c.work.model} disabled={busy} onChange={(e) => save({ workModel: e.target.value }, `Model for the work: ${e.target.value}`)}>
+            <option value="mistral-medium-latest">Mistral Medium (recommended)</option>
+            <option value="mistral-large-latest">Mistral Large (most capable, slower)</option>
+            <option value="mistral-small-latest">Mistral Small (fastest)</option>
+          </select>
+        </Field>
+        <Field label="Model for understanding requests">
+          <select className={inputCls} value={c.model} disabled={busy} onChange={(e) => save({ model: e.target.value }, `Model for understanding: ${e.target.value}`)}>
             <option value="mistral-small-latest">Mistral Small (recommended)</option>
             <option value="ministral-8b-latest">Ministral 8B</option>
             <option value="mistral-medium-latest">Mistral Medium</option>

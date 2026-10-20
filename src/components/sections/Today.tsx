@@ -98,7 +98,7 @@ export function TodayView({ state, refresh, go }: SectionProps & { go: Go }) {
           <RunningNow state={state} />
           <DoneForYouCard done={state.autopilot.done} refresh={refresh} />
           <RemindersCard reminders={state.today.reminders} refresh={refresh} onEmpty={() => go("actions")} />
-          <RequestsCard requests={state.requests} go={go} />
+          <RequestsCard requests={state.requests} go={go} refresh={refresh} />
           {state.today.weekly && (
             <Card title={state.today.weekly.title} subtitle={`Delivered ${relative(state.today.weekly.created_at)} by the Chief of Staff`}>
               <details>

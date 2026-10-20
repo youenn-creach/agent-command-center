@@ -3,6 +3,7 @@ import { logActivity } from "../activity";
 import { addDocument } from "../retrieval/knowledge";
 import { createJob } from "../scheduler/scheduler";
 import { config } from "../config";
+import { addDays, localToday, zonedToUtc } from "../agents/eventParse";
 import { DEMO_DOCS } from "./corpus";
 import { seedSuggestedSources } from "../news/feeds";
 
@@ -42,11 +43,10 @@ const GRANTS: [string, string, string][] = [
   ["knowledge", "public-news", "read"],
 ];
 
+/** h:m on a day relative to `base`, in the configured time zone (ACC_TIMEZONE), never the machine's (CI runs in UTC). */
 function at(base: Date, dayOffset: number, h: number, m: number) {
-  const d = new Date(base);
-  d.setDate(d.getDate() + dayOffset);
-  d.setHours(h, m, 0, 0);
-  return d.toISOString();
+  const tz = config().timezone;
+  return zonedToUtc(addDays(localToday(base, tz), dayOffset), h * 60 + m, tz).toISOString();
 }
 
 export function resetDemo(ctx: Ctx) {

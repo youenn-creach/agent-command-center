@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { getSetting, type Ctx } from "../db";
-import { localLlm, type LlmProvider } from "../llm";
+import { workLlm, type LlmProvider } from "../llm";
 
 /**
  * Model-based splitting of two-part requests (docs/ACCURACY_PLAN.md, phase B). The wording rules in splitAsks keep growing
@@ -40,7 +40,7 @@ export function ownWords(part: string, text: string): boolean {
  * The model's split: [a, b] for two requests, "one" when it reads a single request, null when it couldn't say (not asked,
  * model down, unreadable answer, a part not in the user's words): the caller then uses the wording rules.
  */
-export async function modelSplit(ctx: Ctx, text: string, llm: LlmProvider = localLlm(ctx, "background")): Promise<[string, string] | "one" | null> {
+export async function modelSplit(ctx: Ctx, text: string, llm: LlmProvider = workLlm(ctx, "background")): Promise<[string, string] | "one" | null> {
   if (!JOINED.test(text) || words(text).length < 6) return null;
   try {
     const out = await llm.generate(SPLIT_SYSTEM, `Message: ${text}`, { maxTokens: 160, timeoutMs: 600_000, format: SPLIT_SCHEMA, temperature: 0, keepAlive: "15m" });

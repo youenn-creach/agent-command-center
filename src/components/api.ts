@@ -1,10 +1,11 @@
 "use client";
 
-export async function post<T = unknown>(path: string, body: unknown): Promise<T> {
+export async function post<T = unknown>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, {
     method: "POST",
     headers: { "content-type": "application/json", "x-acc-request": "1" },
     body: JSON.stringify(body),
+    signal,
   });
   const data = (await res.json().catch(() => ({}))) as T & { error?: string };
   if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);

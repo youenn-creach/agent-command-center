@@ -5,7 +5,8 @@ import { logActivity } from "../activity";
 import { demoRowsFilter, serviceHidden } from "../mode";
 import { callTool, type EventRow } from "../tools/registry";
 import { RunBudget } from "../tools/budget";
-import { draftLlmFor, fenceUntrusted, localLlm, selectedModel, UNTRUSTED_DATA_RULES, type LlmProvider } from "../llm";
+import { draftLlmFor, fenceUntrusted, localLlm, workLlm, selectedModel, UNTRUSTED_DATA_RULES, type LlmProvider } from "../llm";
+import { cloudWorker } from "../cloudRouter";
 import { aboutMePrompt } from "../memory";
 import { detectLanguage } from "../lang";
 import { injectionFlags, isAiDirected, stem } from "../retrieval/text";
@@ -249,8 +250,8 @@ export function quickRoute(text: string): Route | null {
 }
 
 /** Asks the local model which skill a request is for (structured JSON, validated). Throws if the model is unavailable. */
-export async function routeRequest(ctx: Ctx, text: string, llm: LlmProvider = localLlm(ctx, "background"), people: string[] = []): Promise<Route & { model: string; ms: number }> {
-  llm ??= localLlm(ctx, "background");
+export async function routeRequest(ctx: Ctx, text: string, llm: LlmProvider = workLlm(ctx, "background"), people: string[] = []): Promise<Route & { model: string; ms: number }> {
+  llm ??= workLlm(ctx, "background");
   const restate = restateOn(ctx);
   const system = routerPrompt(restate);
   // The most similar labelled requests go in the user message, after the fixed instructions, so the model's cache of the
@@ -287,7 +288,8 @@ let lastWarm = 0;
  * takes seconds instead of minutes. At most once a minute, and never while the model is busy.
  */
 export function warmRouter(ctx: Ctx, busy: boolean, llm: LlmProvider = localLlm(ctx, "background")) {
-  if (busy || Date.now() - lastWarm < 60_000) return { warming: false };
+  // While Mistral's cloud does the work, the local model isn't needed: don't load 6 GB into memory for nothing.
+  if (busy || Date.now() - lastWarm < 60_000 || cloudWorker(ctx)) return { warming: false };
   lastWarm = Date.now();
   void llm.generate(routerPrompt(restateOn(ctx)), "Request: hello", { maxTokens: 1, timeoutMs: 600_000, format: ROUTE_JSON_SCHEMA, temperature: 0, keepAlive: "15m" }).catch(() => {});
   return { warming: true };
@@ -489,7 +491,7 @@ export function calendarQuestion(text: string): boolean {
 }
 
 /** The model answers a calendar question from exactly the events the list shows; the list stays under the answer. */
-export async function calendarModelAnswer(ctx: Ctx, text: string, listed: SkillAnswer, progress: (s: string) => void, llm: LlmProvider = localLlm(ctx, "background")): Promise<SkillAnswer> {
+export async function calendarModelAnswer(ctx: Ctx, text: string, listed: SkillAnswer, progress: (s: string) => void, llm: LlmProvider = workLlm(ctx, "background")): Promise<SkillAnswer> {
   progress("Reading your calendar to answer…");
   const now = ctx.now();
   const today = `${now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: tz() })}, ${hm(now.toISOString())}`;
@@ -978,7 +980,7 @@ export const WEB_SYSTEM = [
  * "Who won the final?", "opening hours of the Picasso museum": the user's own SearXNG finds pages, the top
  * three are read (public https pages only), and the local model answers with numbered sources.
  */
-export async function webAnswer(ctx: Ctx, question: string, query: string, progress: (s: string) => void, llm: LlmProvider = localLlm(ctx, "background")): Promise<SkillAnswer> {
+export async function webAnswer(ctx: Ctx, question: string, query: string, progress: (s: string) => void, llm: LlmProvider = workLlm(ctx, "background")): Promise<SkillAnswer> {
   const found = await webSources(ctx, query, progress);
   if (!("results" in found)) return found;
   progress("Writing the answer…");
@@ -1191,7 +1193,7 @@ async function extractEvent(ctx: Ctx, text: string, docs: SourceDoc[], items: Sk
  * "Check when I registered for the race and add it to my calendar": search the mail, read the best
  * matches, and pull out the event (the caller proposes it).
  */
-export async function findEventInEmail(ctx: Ctx, text: string, query: string, progress: (s: string) => void, llm: LlmProvider = localLlm(ctx, "background")): Promise<EventFromEmail> {
+export async function findEventInEmail(ctx: Ctx, text: string, query: string, progress: (s: string) => void, llm: LlmProvider = workLlm(ctx, "background")): Promise<EventFromEmail> {
   if (!isConnected(ctx, "gmail")) return { reply: "Gmail isn't connected, so I can't look in your mail. Connect it in Connections & Permissions.", section: "permissions" };
   const q = widenQuery((query.replace(/[\r\n]+/g, " ").trim() || searchWords(text)).slice(0, 250));
   progress("Searching your mail…");
@@ -1249,7 +1251,7 @@ async function webSources(ctx: Ctx, query: string, progress: (s: string) => void
 const webItems = (results: WebResult[]) => results.slice(0, 5).map((r) => ({ title: `[${r.n}] ${r.title}`, detail: new URL(r.url).hostname, href: r.url }));
 
 /** "When is the Barcelona marathon 2027? Add it to my calendar": the event from public web pages. */
-export async function findEventOnWeb(ctx: Ctx, text: string, query: string, progress: (s: string) => void, llm: LlmProvider = localLlm(ctx, "background"), nextYear = false): Promise<EventFromEmail> {
+export async function findEventOnWeb(ctx: Ctx, text: string, query: string, progress: (s: string) => void, llm: LlmProvider = workLlm(ctx, "background"), nextYear = false): Promise<EventFromEmail> {
   const first = await findEventOnWebOnce(ctx, text, nextYear ? `${query} ${ctx.now().getUTCFullYear() + 1}` : query, progress, llm);
   // The edition found is already over (this year's race): the user means the next one.
   if (!nextYear && "reply" in first && /is already over, so I didn't add it/.test(first.reply)) {
@@ -1274,7 +1276,7 @@ async function findEventOnWebOnce(ctx: Ctx, text: string, query: string, progres
 }
 
 /** "When is my hotel check-in in Lisbon?": find the emails, read them, answer with sources. */
-export async function emailQuestion(ctx: Ctx, question: string, query: string, progress: (s: string) => void, llm: LlmProvider = localLlm(ctx, "background")): Promise<SkillAnswer> {
+export async function emailQuestion(ctx: Ctx, question: string, query: string, progress: (s: string) => void, llm: LlmProvider = workLlm(ctx, "background")): Promise<SkillAnswer> {
   query = query.replace(/[\r\n]+/g, " ").trim().slice(0, 250);
   if (!isConnected(ctx, "gmail")) return { reply: "Gmail isn't connected, so I can't look in your mail. Connect it in Connections & Permissions.", section: "permissions" };
   progress("Searching your mail…");
@@ -1328,7 +1330,7 @@ const PREP_SYSTEM = [
 ].join("\n");
 
 /** "Prep me for my meeting with Laura": the event, recent emails with her, related notes, summarized. */
-export async function meetingPrep(ctx: Ctx, text: string, who: string, progress: (s: string) => void, llm: LlmProvider = localLlm(ctx, "background")): Promise<SkillAnswer> {
+export async function meetingPrep(ctx: Ctx, text: string, who: string, progress: (s: string) => void, llm: LlmProvider = workLlm(ctx, "background")): Promise<SkillAnswer> {
   progress("Looking at your calendar…");
   const w = who.toLowerCase();
   const range = parseRange(/\b(today|tomorrow|week|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2} \w+)\b/i.test(text) ? text : "the next 14 days", ctx.now(), tz());
@@ -1400,7 +1402,7 @@ export async function draftReplyFree(ctx: Ctx, who: string, message: string, pro
   // An email that talks to an AI is not shown to the model: the reply is written from your words only.
   const aiDirected = isAiDirected(injectionFlags(`${msg.subject}\n${read.text}`));
   const lang = detectLanguage(read.text);
-  const written = await writeReply(draftLlmFor(ctx, lang, localLlm(ctx, "background")), msg.sender, msg.subject, aiDirected ? "" : read.text, senderName, aboutMePrompt(ctx), lang, message);
+  const written = await writeReply(draftLlmFor(ctx, lang, workLlm(ctx, "background")), msg.sender, msg.subject, aiDirected ? "" : read.text, senderName, aboutMePrompt(ctx), lang, message);
   const subject = /^re:/i.test(msg.subject) ? msg.subject : `Re: ${msg.subject}`;
   if (!isConnected(ctx, "gmail-drafts")) {
     return { reply: `Here's a reply to ${senderName ?? email} (“${msg.subject}”). Connect “Gmail drafts” to have it placed in Gmail for you; for now, copy it:`, items: [{ title: subject, detail: written.reply }] };
@@ -1443,7 +1445,7 @@ export async function notesAnswer(ctx: Ctx, query: string, progress: (s: string)
   if (!check(ctx, "knowledge", "demo-notes", "read")) return { reply: "The Knowledge agent has no read access to your notes. Grant it in Connections & Permissions.", section: "permissions" };
   const provider = nanoModelInstalled() && knowledgeStats(ctx).localVectors > 0 ? "local-semantic" : "lexical";
   progress("Searching your notes…");
-  const res = await retrieve(ctx, { query, provider, k: 4, answer: true, question: question && question !== query ? question.slice(0, 500) : undefined }, localLlm(ctx, "background"), "chief_of_staff");
+  const res = await retrieve(ctx, { query, provider, k: 4, answer: true, question: question && question !== query ? question.slice(0, 500) : undefined }, workLlm(ctx, "background"), "chief_of_staff");
   if (!res.passages.length) return { reply: `I found nothing about “${query}” in your notes.`, section: "knowledge" };
   return {
     reply: res.answer?.text ? groundNumbers(plainAnswer(res.answer.text), `${query} ${res.passages.map((p) => `${p.title} ${p.text}`).join(" ")}`) : `Top notes for “${query}”:`,
